@@ -1,6 +1,4 @@
 use core::panic;
-use std::thread::current;
-
 use std::collections;
 
 // https://rust-unofficial.github.io/patterns/patterns/behavioural/visitor.html
@@ -16,61 +14,101 @@ pub enum Node {
     BinaryMul([Box<Node>; 2]),
     BinaryDiv([Box<Node>; 2]),
     Variable(String),
+    Assign(String, Box<Node>),
     Compound(Vec<Node>)
 }
 
 // TODO: store memory in here
-struct InterpreterContext {
-
+struct InterpreterContext<'mem> {
+    memory : &'mem mut collections::BTreeMap<String, Node>
 }
 
 // TODO: Store token stream, token index, memory
-struct ParserContext {
-
+struct ParserContext<'mem> {
+    token_stream : &'mem Vec<Token>,
+    token_index: usize,
+    memory : &'mem mut collections::BTreeMap<String, Node>
 }
 
 // TODO: Store code string, string index
 struct LexerContext {
+    program : String,
+    program_index : usize
+}
 
+impl LexerContext {
+    pub fn new(program : String) -> LexerContext {
+        return LexerContext{program: program, program_index: 0};
+    }
+}
+
+impl ParserContext<'_> {
+    pub fn new<'mem>(token_stream : &'mem Vec<Token>, memory: &'mem mut collections::BTreeMap<String, Node> ) -> ParserContext<'mem> {
+        return ParserContext{token_stream: token_stream, token_index: 0, memory: memory};
+    }
+}
+
+impl InterpreterContext<'_> {
+    pub fn new<'mem>(memory : &'mem mut collections::BTreeMap<String, Node>) -> InterpreterContext<'mem> {
+        return InterpreterContext{memory: memory};
+    }
 }
 
 // TODO: proper "advance" and "peek" functions for lexer/parser/interpreter
 // TODO: multi-file project probably soon (or at least namespaces for lexer/parser/interpreter)
 
 // Switch and call correct visitor method
-fn visit(n: &Node) -> Node {
+fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
     match n {
-        Node::BinaryAdd(children) => return visit_add(&children[0], &children[1]),
-        Node::BinarySub(children) => return visit_sub(&children[0], &children[1]),
-        Node::BinaryMul(children) => return visit_mul(&children[0], &children[1]),
-        Node::BinaryDiv(children) => return visit_div(&children[0], &children[1]),
-        Node::Compound(children) => return visit_compound(children),
+        Node::BinaryAdd(children) => return visit_add(&children[0], &children[1], interpreter_context),
+        Node::BinarySub(children) => return visit_sub(&children[0], &children[1], interpreter_context),
+        Node::BinaryMul(children) => return visit_mul(&children[0], &children[1], interpreter_context),
+        Node::BinaryDiv(children) => return visit_div(&children[0], &children[1], interpreter_context),
+        Node::Compound(children) => return visit_compound(children, interpreter_context),
         Node::Number(value) => return Node::Number(*value),
-        Node::Variable(string) => return visit_variable(string),
-        Node::None => return Node::None,
-        _ => panic!("Couldn't extract value of node")
+        Node::Variable(string) => return visit_variable(string, interpreter_context),
+        Node::Assign(string, value) => return visit_assign(string, value, interpreter_context), 
+        Node::None => return Node::None
     }
 }
 
-fn visit_variable(string : &String) -> Node {
-    // TODO: need to pass in memory, and then lookup variable in memory
-    
-    return Node::Number(5.0);
+fn copy_value(node : &Node) -> Node {
+    if let Node::Number(value) = node {
+        return Node::Number(*value);
+    }
+
+    panic!("Expected variable to have numerical value");
 }
 
-fn visit_compound(children : &Vec<Node>) -> Node {
+fn visit_assign(string : &String, value : &Node, interpreter_context : &mut InterpreterContext) -> Node {
+    let rhs = visit(value, interpreter_context);
+    
+    if interpreter_context.memory.contains_key(string) {
+        *interpreter_context.memory.get_mut(string).unwrap() = rhs;
+    } else {
+        interpreter_context.memory.insert(String::from(string), rhs);
+    }
+
+    return copy_value(&interpreter_context.memory[string]);
+}
+
+fn visit_variable(string : &String, interpreter_context: &mut InterpreterContext) -> Node {
+    return copy_value(&interpreter_context.memory[string]);
+}
+
+fn visit_compound(children : &Vec<Node>, interpreter_context: &mut InterpreterContext) -> Node {
     let mut last_node : Node = Node::None;
     
     for child in children {
-        last_node = visit(child);
+        last_node = visit(child, interpreter_context);
     }
 
     return last_node;
 }
 
-fn visit_binary_number(left: &Node, right: &Node) -> [f32; 2] {
-    let visited_left : Node = visit(left);
-    let visited_right : Node = visit(right);
+fn visit_binary_number(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> [f32; 2] {
+    let visited_left : Node = visit(left, interpreter_context);
+    let visited_right : Node = visit(right, interpreter_context);
 
     // Attempt to convert both to number types
     if let Node::Number(left_value) = visited_left {
@@ -82,26 +120,26 @@ fn visit_binary_number(left: &Node, right: &Node) -> [f32; 2] {
     panic!("One side of binary add was invalid");
 }
 
-fn visit_add(left: &Node, right: &Node) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right);
+fn visit_add(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
 
     return Node::Number(values[0] + values[1]);
 }
 
-fn visit_sub(left: &Node, right: &Node) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right);
+fn visit_sub(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
 
     return Node::Number(values[0] - values[1]);
 }
 
-fn visit_div(left: &Node, right: &Node) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right);
+fn visit_div(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
 
     return Node::Number(values[0] / values[1]);
 }
 
-fn visit_mul(left: &Node, right: &Node) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right);
+fn visit_mul(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
 
     return Node::Number(values[0] * values[1]);
 }
@@ -174,22 +212,20 @@ fn read_identifier(string : &String, pos : &mut usize) -> Token {
     return Token::Identifier(identifier);
 }
 
-fn lex(string : &String) -> Vec<Token> {
+fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
     let mut tokens : Vec<Token> = Vec::new();
 
-    let mut current_pos : usize = 0;
-
-    while current_pos < string.len() {
-        let current_char : u8 = string.as_bytes()[current_pos];
+    while lexer_context.program_index < lexer_context.program.len() {
+        let current_char : u8 = lexer_context.program.as_bytes()[lexer_context.program_index];
 
         // Read identifier
         if current_char.is_ascii_alphabetic() {
-            tokens.push(read_identifier(string, &mut current_pos));
+            tokens.push(read_identifier(&lexer_context.program, &mut lexer_context.program_index));
         } else {
             match current_char {
                 b'0'..=b'9' | b'.' => {
-                    tokens.push(read_number(string, &mut current_pos));
-                    current_pos -= 1;
+                    tokens.push(read_number(&lexer_context.program, &mut lexer_context.program_index));
+                    lexer_context.program_index -= 1;
                 }
                 b'+' | b'-' | b'*' | b'/' => {
                     tokens.push(Token::Operator(current_char));
@@ -204,7 +240,7 @@ fn lex(string : &String) -> Vec<Token> {
             }
         }
 
-        current_pos += 1;
+        lexer_context.program_index += 1;
     }
 
     return tokens;
@@ -318,9 +354,7 @@ fn statement(token_index : &mut usize, token_stream: &Vec<Token>, memory : &mut 
 
                         let rhs: Node = expression(token_index, token_stream, memory);
 
-                        memory.insert(name.to_string(), rhs);
-
-                        return Node::Variable(String::from(name));
+                        return Node::Assign(String::from(name), Box::new(rhs));
                     },
                     _ => {
                         return expression(token_index, token_stream, memory);
@@ -330,8 +364,6 @@ fn statement(token_index : &mut usize, token_stream: &Vec<Token>, memory : &mut 
             Token::Number(_) => return expression(token_index, token_stream, memory),
             _ => return Node::None
         }
-
-        // *token_index += 1;
     }
 
     return Node::None;
@@ -339,19 +371,19 @@ fn statement(token_index : &mut usize, token_stream: &Vec<Token>, memory : &mut 
 
 // Build an AST from a token stream
 // Recursive descent parser
-fn parse(token_index : &mut usize, token_stream: &Vec<Token>, memory : &mut collections::BTreeMap<String, Node>) -> Node {
+fn parse(parser_context : &mut ParserContext) -> Node {
     let mut statements : Vec<Node> = Vec::new();
     
-    while *token_index < token_stream.len() {
+    while parser_context.token_index < parser_context.token_stream.len() {
         // Read a statement
-        statements.push(statement(token_index, token_stream, memory));
+        statements.push(statement(&mut parser_context.token_index, parser_context.token_stream, &mut parser_context.memory));
 
-        if *token_index < token_stream.len() {
-            let current_token : &Token = &token_stream[*token_index];
+        if parser_context.token_index < parser_context.token_stream.len() {
+            let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
         
             // Expect an end token
             if let Token::StatementEnd = current_token {
-                *token_index += 1;
+                parser_context.token_index += 1;
             }
             else { break; }
         }
@@ -360,17 +392,18 @@ fn parse(token_index : &mut usize, token_stream: &Vec<Token>, memory : &mut coll
     return Node::Compound(statements);
 }
 
-fn interpret(tree: &Node) -> Node {
-    return visit(tree);
+fn interpret(tree : Node, interpreter_context: &mut InterpreterContext) -> Node {
+    return visit(&tree, interpreter_context);
 }
 
 fn main() {
-    let mut memory : collections::BTreeMap<String, Node> = collections::BTreeMap::new();
-    let input : String = String::from("x=5+3;x");
-    let tokens: Vec<Token> = lex(&input);
-    let mut token_index : usize = 0;
-    let tree: Node = parse(&mut token_index, &tokens, &mut memory);
-    let result : Node = interpret(&tree);
+    let mut lexer_context : LexerContext = LexerContext::new(String::from("x=5+3;x=x+2;x=x/2"));
+    let tokens : Vec<Token> = lex(&mut lexer_context);
+    let mut memory : collections::BTreeMap<String, Node> = collections::BTreeMap::<String, Node>::new();
+    let mut parser_context : ParserContext = ParserContext::new(&tokens, &mut memory);
+    let tree : Node = parse(&mut parser_context);
+    let mut interpreter_context : InterpreterContext = InterpreterContext::new(&mut memory);
+    let result : Node = interpret(tree, &mut interpreter_context);
 
     if let Node::Number(value) = result {
         println!("Res: {value}");
