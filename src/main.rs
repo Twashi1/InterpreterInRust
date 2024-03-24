@@ -1,5 +1,5 @@
 use core::{fmt, panic};
-use std::{collections, str::ParseBoolError};
+use std::{collections, slice::SliceIndex};
 
 // https://rust-unofficial.github.io/patterns/patterns/behavioural/visitor.html
 
@@ -11,6 +11,8 @@ enum Node {
     None,
     Number(f32),
     Boolean(bool),
+    String(String),
+    InterpolatedString(String),
     BinaryAdd([Box<Node>; 2]),
     BinarySub([Box<Node>; 2]),
     BinaryMul([Box<Node>; 2]),
@@ -37,6 +39,8 @@ impl fmt::Display for Node {
             Node::None => write!(f, "None"),
             Node::Number(value) => write!(f, "Number({value})"),
             Node::Boolean(value) => write!(f, "Boolean({value})"),
+            Node::String(value) => write!(f, "String({value})"),
+            Node::InterpolatedString(value) => write!(f, "InterpolatedString({value})"),
             Node::BinaryAdd(_) => write!(f, "Add"),
             Node::BinarySub(_) => write!(f, "Subtract"),
             Node::BinaryMul(_) => write!(f, "Multiply"),
@@ -58,18 +62,15 @@ impl fmt::Display for Node {
     }
 }
 
-// TODO: store memory in here
 struct InterpreterContext<'mem> {
     memory : &'mem mut collections::BTreeMap<String, Node>
 }
 
-// TODO: Store token stream, token index, memory
 struct ParserContext<'mem> {
     token_stream : &'mem Vec<Token>,
     token_index: usize
 }
 
-// TODO: Store code string, string index
 struct LexerContext {
     program : String,
     program_index : usize
@@ -108,6 +109,8 @@ fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
         Node::Variable(string)              => return visit_variable(string, interpreter_context),
         Node::Assign(string, value)         => return visit_assign(string, value, interpreter_context),
         Node::Boolean(value)                => return Node::Boolean(*value),
+        Node::String(value)                 => return Node::String(String::from(value)),
+        Node::InterpolatedString(value)     => return visit_interpolated_string(&value, interpreter_context),
         Node::BooleanEqual(children)        => return visit_equal(&children[0], &children[1], interpreter_context),
         Node::BooleanNotEqual(children)     => return visit_not_equal(&children[0], &children[1], interpreter_context),
         Node::BooleanLess(children)         => return visit_less(&children[0], &children[1], interpreter_context),
@@ -126,6 +129,73 @@ type BinaryNumberFunction = fn(f32, f32) -> Node;
 type BinaryBooleanFunction = fn(bool, bool) -> Node;
 type BinaryFunctionTuple = (Option<BinaryBooleanFunction>, Option<BinaryNumberFunction>);
 
+fn string_convert(node : Node) -> String {
+    match node {
+        Node::String(value) => return String::from(value),
+        Node::Number(value) => return value.to_string(),
+        Node::Boolean(value) => return value.to_string(),
+        _ => panic!("No string conversion available for {node}")
+    }
+}
+
+fn visit_interpolated_string(value : &String, interpreter_context : &mut InterpreterContext) -> Node {
+    // TODO: extract the formatted parts
+    // TODO: build lex and parser for each (seems really time-consuming)
+    // TODO: then we lex and parse the formatted parts
+    // TODO: then we can interpret the contents using the existing interpreter context
+    let mut operating_string : String = String::from(value);
+    let mut start_index : usize = usize::MAX;
+    let mut current_index : usize = 0;
+    let mut is_escaped = false;
+
+    while current_index < operating_string.len() {
+        let current_char : u8 = operating_string.as_bytes()[current_index];
+
+        match current_char {
+            b'\\' => is_escaped = !is_escaped,
+            b'{' => {
+                if !is_escaped {
+                    // We actually keep the curlies because they're required for a valid program
+                    start_index = current_index
+                }
+            }
+            b'}' => {
+                if start_index != usize::MAX && !is_escaped {
+                    // Keeping the curlies
+                    let string_slice : &str = &operating_string[start_index..current_index + 1];
+                    
+                    let mut lexer_context : LexerContext = LexerContext::new(String::from(string_slice));
+                    let token_stream : Vec<Token> = lex(&mut lexer_context);
+
+                    let mut parser_context : ParserContext = ParserContext::new(&token_stream);
+                    let tree : Node = parse(&mut parser_context);
+
+                    let result : Node = visit(&tree, interpreter_context);
+                    let string_result : String = string_convert(result);
+
+                    let mut new_string : String = String::from(&operating_string[0..start_index]);
+                    new_string.push_str(&string_result);
+
+                    let new_current_index = new_string.len();
+
+                    new_string.push_str(&operating_string[current_index + 1..]);
+
+                    operating_string = new_string;
+                    current_index = new_current_index;
+
+                    start_index = usize::MAX;
+                }
+            }
+            _ => is_escaped = false
+        }
+
+        current_index += 1;
+    }
+    
+    return Node::String(operating_string);
+}
+
+// TODO: string binary operations
 fn visit_binary_operation(lhs: &Node, rhs: &Node, functions : BinaryFunctionTuple, interpreter_context : &mut InterpreterContext) -> Node {
     let lhs_visited : Node = visit(lhs, interpreter_context);
     let rhs_visited : Node = visit(rhs, interpreter_context);
@@ -161,10 +231,13 @@ fn visit_binary_operation(lhs: &Node, rhs: &Node, functions : BinaryFunctionTupl
     }
 }
 
+// TODO: probably prefer another visit call as opposed to copy_value?
 fn copy_value(node : &Node) -> Node {
     match node {
         Node::Number(value) => return Node::Number(*value),
         Node::Boolean(value) => return Node::Boolean(*value),
+        Node::String(value) => return Node::String(String::from(value)),
+        Node::InterpolatedString(value) => return Node::InterpolatedString(String::from(value)),
         _ => panic!("Expected variable to have value")
     }
 }
@@ -368,6 +441,8 @@ enum Token {
     None,
     Number(f32),
     Boolean(bool),
+    String(String),
+    InterpolatedString(String),
     Add,
     Subtract,
     Divide,
@@ -396,6 +471,8 @@ impl fmt::Display for Token {
             Token::None => write!(f, "None"),
             Token::Number(value) => write!(f, "Number({value})"),
             Token::Boolean(value) => write!(f, "Bool({value})"),
+            Token::String(value) => write!(f, "String({value})"),
+            Token::InterpolatedString(value) => write!(f, "IString({value})"),
             Token::Add => write!(f, "Add"),
             Token::Subtract => write!(f, "Subtract"),
             Token::Divide => write!(f, "Divide"),
@@ -486,7 +563,7 @@ fn read_identifier(string : &String, pos : &mut usize) -> Token {
     let start: usize = *pos;
     
     while *pos < string.len() {
-        let current_char = string.as_bytes()[*pos];
+        let current_char : u8 = string.as_bytes()[*pos];
 
         if current_char.is_ascii_alphabetic() {
             *pos += 1;
@@ -502,6 +579,63 @@ fn read_identifier(string : &String, pos : &mut usize) -> Token {
         Some(value) => return copy_token(value),
         None => return Token::Identifier(identifier)
     }
+}
+
+fn read_string(string : &String, pos : &mut usize) -> Token {
+    // Advance past first quotation mark
+    *pos += 1;
+
+    let start : usize = *pos;
+    let mut is_escaped : bool = false;
+
+    while *pos < string.len() {
+        let current_char : u8 = string.as_bytes()[*pos];
+
+        match current_char {
+            b'\\' => is_escaped = !is_escaped,
+            b'"' => {
+                if !is_escaped {
+                    break;
+                }
+            }
+            _ => is_escaped = false
+        }
+
+        *pos += 1;
+    }
+
+    // Jump past ending quotation mark
+    *pos += 1;
+
+    return Token::String(String::from(&string[start..*pos - 1]));
+}
+
+fn read_istring(string : &String, pos : &mut usize) -> Token {
+    // Advance past first quotation mark
+    *pos += 1;
+
+    let start : usize = *pos;
+    let mut is_escaped : bool = false;
+
+    while *pos < string.len() {
+        let current_char : u8 = string.as_bytes()[*pos];
+
+        match current_char {
+            b'\\' => is_escaped = !is_escaped,
+            b'`' => {
+                if !is_escaped {
+                    break;
+                }
+            }
+            _ => is_escaped = false
+        }
+
+        *pos += 1;
+    }
+
+    *pos += 1;
+
+    return Token::InterpolatedString(String::from(&string[start..*pos - 1]));
 }
 
 fn lex_peek(lexer_context : &LexerContext) -> u8 {
@@ -564,11 +698,17 @@ fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
                 b';' => {
                     new_token = Token::StatementEnd;
                 }
+                b'"' => {
+                    new_token = read_string(&lexer_context.program, &mut lexer_context.program_index);
+                }
+                b'`' => {
+                    new_token = read_istring(&lexer_context.program, &mut lexer_context.program_index);
+                }
                 _ => panic!("Couldn't match character: {current_char}")
             }
         }
 
-        // Read whitespace or something
+        // Read whitespace
         if let Token::None = new_token {}
         else {
             tokens.push(new_token);
@@ -612,7 +752,9 @@ fn precedence_value(parser_context : &mut ParserContext) -> Node {
     match &parser_context.token_stream[parser_context.token_index] {
         Token::Number(value) => { parser_context.token_index += 1; return Node::Number(*value) },
         Token::Boolean(value) => { parser_context.token_index += 1; return Node::Boolean(*value) },
-        Token::Identifier(name) => { parser_context.token_index += 1; return Node::Variable(String::from(name)) }
+        Token::Identifier(name) => { parser_context.token_index += 1; return Node::Variable(String::from(name)) },
+        Token::String(value) => { parser_context.token_index += 1; return Node::String(String::from(value)) },
+        Token::InterpolatedString(value) => { parser_context.token_index += 1; return Node::InterpolatedString(String::from(value)) },
         _ => panic!("Expected number or identifier")
     }
 }
@@ -802,8 +944,8 @@ fn statement(parser_context : &mut ParserContext) -> Node {
                         return precedence_expression(parser_context, PrecedenceLevels::Expression);
                     }
                 }
-            } 
-            Token::Number(_) | Token::Boolean(_) => return precedence_expression(parser_context, PrecedenceLevels::Expression),
+            },
+            Token::Number(_) | Token::Boolean(_) | Token::String(_) | Token::InterpolatedString(_) => return precedence_expression(parser_context, PrecedenceLevels::Expression),
             Token::If => return parse_if(parser_context),
             _ => return Node::None
         }
@@ -824,8 +966,16 @@ fn interpret(tree : Node, interpreter_context: &mut InterpreterContext) -> Node 
 }
 
 fn main() {
-    let mut lexer_context : LexerContext = LexerContext::new(String::from("{ if 5 * 4 == 24 { 5 + 4 } else { 3 + 2 } }"));
+    let mut lexer_context : LexerContext = LexerContext::new(String::from("{ `Hello {5 * 3} hey` }"));
     let tokens : Vec<Token> = lex(&mut lexer_context);
+
+    let mut i : usize = 0;
+
+    for token in &tokens {
+        println!("Token {i}: {token}");
+
+        i += 1;
+    }
 
     let mut parser_context : ParserContext = ParserContext::new(&tokens);
     let tree : Node = parse(&mut parser_context);
@@ -837,6 +987,7 @@ fn main() {
     match result {
         Node::Number(value) => println!("Result is number {value}"),
         Node::Boolean(value) => println!("Result is bool {value}"),
+        Node::String(value) => println!("Result is string {value}"),
         _ => println!("Interpreter didn't return value")
     }
 }
