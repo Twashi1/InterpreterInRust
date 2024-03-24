@@ -1,12 +1,13 @@
-use core::panic;
-use std::{collections, fmt::LowerExp, thread::current};
+use core::{fmt, panic};
+use std::{collections, str::ParseBoolError};
 
 // https://rust-unofficial.github.io/patterns/patterns/behavioural/visitor.html
 
 // TODO: could extend number to integer, float, etc.
 //      maybe from that figure out traits to more easily perform operations
 // TODO: remove pub, i think only needed because was in some namespace before
-pub enum Node {
+
+enum Node {
     None,
     Number(f32),
     Boolean(bool),
@@ -25,7 +26,36 @@ pub enum Node {
     BooleanAnd([Box<Node>; 2]),
     Variable(String),
     Assign(String, Box<Node>),
+    // Condition, then compound, then else tree
+    If(Box<Node>, Box<Node>, Option<Box<Node>>),
     Compound(Vec<Node>)
+}
+
+impl fmt::Display for Node {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Node::None => write!(f, "None"),
+            Node::Number(value) => write!(f, "Number({value})"),
+            Node::Boolean(value) => write!(f, "Boolean({value})"),
+            Node::BinaryAdd(_) => write!(f, "Add"),
+            Node::BinarySub(_) => write!(f, "Subtract"),
+            Node::BinaryMul(_) => write!(f, "Multiply"),
+            Node::BinaryDiv(_) => write!(f, "Divide"),
+            Node::BooleanGreater(_) => write!(f, "Greater"),
+            Node::BooleanGreaterEqual(_) => write!(f, "GreaterEqual"),
+            Node::BooleanLessEqual(_) => write!(f, "LessEqual"),
+            Node::BooleanLess(_) => write!(f, "Less"),
+            Node::BooleanEqual(_) => write!(f, "Equal"),
+            Node::BooleanNotEqual(_) => write!(f, "NotEqual"),
+            Node::BooleanNot(_) => write!(f, "Not"),
+            Node::BooleanOr(_) => write!(f, "Or"),
+            Node::BooleanAnd(_) => write!(f, "And"),
+            Node::Variable(_) => write!(f, "Variable"),
+            Node::Assign(_, _) => write!(f, "Assign"),
+            Node::If(_, _, _) => write!(f, "If"),
+            Node::Compound(_) => write!(f, "Compound"),
+        }
+    }
 }
 
 // TODO: store memory in here
@@ -69,35 +99,123 @@ impl InterpreterContext<'_> {
 // Switch and call correct visitor method
 fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
     match n {
-        Node::BinaryAdd(children) => return visit_add(&children[0], &children[1], interpreter_context),
-        Node::BinarySub(children) => return visit_sub(&children[0], &children[1], interpreter_context),
-        Node::BinaryMul(children) => return visit_mul(&children[0], &children[1], interpreter_context),
-        Node::BinaryDiv(children) => return visit_div(&children[0], &children[1], interpreter_context),
-        Node::Compound(children) => return visit_compound(children, interpreter_context),
-        Node::Number(value) => return Node::Number(*value),
-        Node::Variable(string) => return visit_variable(string, interpreter_context),
-        Node::Assign(string, value) => return visit_assign(string, value, interpreter_context),
-        Node::Boolean(value) => return Node::Boolean(*value),
-        Node::BooleanEqual(children) => return visit_equal(&children[0], &children[1], interpreter_context),
-        Node::BooleanNotEqual(children) => return visit_not_equal(&children[0], &children[1], interpreter_context),
-        Node::BooleanLess(children) => return visit_less(&children[0], &children[1], interpreter_context),
-        Node::BooleanLessEqual(children) => return visit_less_equal(&children[0], &children[1], interpreter_context),
-        Node::BooleanGreater(children) => return visit_more(&children[0], &children[1], interpreter_context),
+        Node::BinaryAdd(children)           => return visit_add(&children[0], &children[1], interpreter_context),
+        Node::BinarySub(children)           => return visit_sub(&children[0], &children[1], interpreter_context),
+        Node::BinaryMul(children)           => return visit_mul(&children[0], &children[1], interpreter_context),
+        Node::BinaryDiv(children)           => return visit_div(&children[0], &children[1], interpreter_context),
+        Node::Compound(children)            => return visit_compound(children, interpreter_context),
+        Node::Number(value)                 => return Node::Number(*value),
+        Node::Variable(string)              => return visit_variable(string, interpreter_context),
+        Node::Assign(string, value)         => return visit_assign(string, value, interpreter_context),
+        Node::Boolean(value)                => return Node::Boolean(*value),
+        Node::BooleanEqual(children)        => return visit_equal(&children[0], &children[1], interpreter_context),
+        Node::BooleanNotEqual(children)     => return visit_not_equal(&children[0], &children[1], interpreter_context),
+        Node::BooleanLess(children)         => return visit_less(&children[0], &children[1], interpreter_context),
+        Node::BooleanLessEqual(children)    => return visit_less_equal(&children[0], &children[1], interpreter_context),
+        Node::BooleanGreater(children)      => return visit_more(&children[0], &children[1], interpreter_context),
         Node::BooleanGreaterEqual(children) => return visit_more_equal(&children[0], &children[1], interpreter_context),
-        // TODO
-        Node::BooleanOr(children) => return Node::None,
-        Node::BooleanAnd(children) => return Node::None,
-        Node::BooleanNot(node) => return Node::None,
-        Node::None => return Node::None
+        Node::BooleanOr(children)           => return visit_or(&children[0], &children[1], interpreter_context),
+        Node::BooleanAnd(children)          => return visit_and(&children[0], &children[1], interpreter_context),
+        Node::BooleanNot(node)              => return visit_not(&node, interpreter_context),
+        Node::If(condition, compound, tree) => return visit_if(&condition, &compound, &tree, interpreter_context),
+        Node::None                          => return Node::None
+    }
+}
+
+type BinaryNumberFunction = fn(f32, f32) -> Node;
+type BinaryBooleanFunction = fn(bool, bool) -> Node;
+type BinaryFunctionTuple = (Option<BinaryBooleanFunction>, Option<BinaryNumberFunction>);
+
+fn visit_binary_operation(lhs: &Node, rhs: &Node, functions : BinaryFunctionTuple, interpreter_context : &mut InterpreterContext) -> Node {
+    let lhs_visited : Node = visit(lhs, interpreter_context);
+    let rhs_visited : Node = visit(rhs, interpreter_context);
+    
+    // TODO: is there a way to use a jump table here?
+    // would have to use numerical value of enum somehow, or associate a numerical value
+    // that could be easily extracted from Node and constant
+
+    match lhs_visited {
+        Node::Number(lhs_value) => {
+            if let Node::Number(rhs_value) = rhs_visited {
+                // TODO: 1 is a bit of a magic number
+                match functions.1 {
+                    Some(function) => return function(lhs_value, rhs_value),
+                    None => panic!("No function existed for two number inputs")
+                }
+            } else {
+                panic!("Expected two of same type for binary operation, lhs was {lhs_visited}, rhs was {rhs_visited}");
+            }
+        },
+        Node::Boolean(lhs_value) => {
+            if let Node::Boolean(rhs_value) = rhs_visited {
+                // TODO: 0 is a bit of a magic number
+                match functions.0 {
+                    Some(function) => return function(lhs_value, rhs_value),
+                    None => panic!("No function existed for two number inputs")
+                }
+            } else {
+                panic!("Expected two of same type for binary operation, lhs was {lhs_visited}, rhs was {rhs_visited}");
+            }
+        },
+        _ => panic!("Expected value type")
     }
 }
 
 fn copy_value(node : &Node) -> Node {
-    if let Node::Number(value) = node {
-        return Node::Number(*value);
+    match node {
+        Node::Number(value) => return Node::Number(*value),
+        Node::Boolean(value) => return Node::Boolean(*value),
+        _ => panic!("Expected variable to have value")
     }
+}
 
-    panic!("Expected variable to have numerical value");
+fn visit_if(condition : &Node, compound : &Node, else_tree : &Option<Box<Node>>, interpreter_context : &mut InterpreterContext) -> Node {
+    let condition_visited = visit(condition, interpreter_context);
+
+    if let Node::Boolean(value) = condition_visited {
+        if value {
+            return visit(compound, interpreter_context);
+        } else {
+            match else_tree {
+                Some(tree) => return visit(tree, interpreter_context),
+                None => return Node::None
+            }
+        }
+    } else {
+        panic!("Expected condition to return boolean value");
+    }
+}
+
+fn visit_or(left: &Node, right: &Node, interpreter_context : &mut InterpreterContext) -> Node {
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            Some(|a : bool, b : bool| -> Node { return Node::Boolean(a || b); }),
+            None
+        ),
+        interpreter_context
+    );
+}
+
+fn visit_and(left: &Node, right: &Node, interpreter_context : &mut InterpreterContext) -> Node {
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            Some(|a : bool, b : bool| -> Node { return Node::Boolean(a && b); }),
+            None
+        ),
+        interpreter_context
+    );
+}
+
+fn visit_not(value: &Node, interpreter_context : &mut InterpreterContext) -> Node {
+    if let Node::Boolean(value_visited) = visit(value, interpreter_context) {
+        return Node::Boolean(!value_visited);
+    } else {
+        panic!("Expected boolean value for not");
+    }
 }
 
 fn visit_assign(string : &String, value : &Node, interpreter_context : &mut InterpreterContext) -> Node {
@@ -126,80 +244,124 @@ fn visit_compound(children : &Vec<Node>, interpreter_context: &mut InterpreterCo
     return last_node;
 }
 
-fn visit_binary_number(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> [f32; 2] {
-    let visited_left : Node = visit(left, interpreter_context);
-    let visited_right : Node = visit(right, interpreter_context);
-
-    // Attempt to convert both to number types
-    if let Node::Number(left_value) = visited_left {
-        if let Node::Number(right_value) = visited_right {
-            return [left_value, right_value];
-        }
-    }
-
-    panic!("One side of binary add was invalid");
-}
-
 fn visit_less(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Boolean(values[0] < values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            None,
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a < b); })
+        ),
+        interpreter_context
+    );
 }
 
 fn visit_more(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Boolean(values[0] > values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            None,
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a > b); })
+        ),
+        interpreter_context
+    );
 }
 
 fn visit_less_equal(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Boolean(values[0] <= values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            None,
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a <= b); })
+        ),
+        interpreter_context
+    );
 }
 
 fn visit_more_equal(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Boolean(values[0] >= values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            None,
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a >= b); })
+        ),
+        interpreter_context
+    );
 }
 
 fn visit_equal(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    // TODO: could be f32/bool
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Boolean(values[0] == values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            Some(|a : bool, b : bool| -> Node { return Node::Boolean(a == b); }),
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a == b); })
+        ),
+        interpreter_context
+    );
 }
 
 fn visit_not_equal(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    // TODO: could be f32/bool
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Boolean(values[0] != values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            Some(|a : bool, b : bool| -> Node { return Node::Boolean(a != b); }),
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a != b); })
+        ),
+        interpreter_context
+    );
 }
 
 fn visit_add(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Number(values[0] + values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            None,
+            Some(|a : f32, b : f32| -> Node { return Node::Number(a + b); })
+        ),
+        interpreter_context
+    );
 }
 
 fn visit_sub(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Number(values[0] - values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            None,
+            Some(|a : f32, b : f32| -> Node { return Node::Number(a - b); })
+        ),
+        interpreter_context
+    );
 }
 
 fn visit_div(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Number(values[0] / values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            None,
+            Some(|a : f32, b : f32| -> Node { return Node::Number(a / b); })
+        ),
+        interpreter_context
+    );
 }
 
 fn visit_mul(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
-    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
-
-    return Node::Number(values[0] * values[1]);
+    return visit_binary_operation(
+        left,
+        right,
+        (
+            None,
+            Some(|a : f32, b : f32| -> Node { return Node::Number(a * b); })
+        ),
+        interpreter_context
+    )
 }
 
 enum Token {
@@ -221,9 +383,41 @@ enum Token {
     Not,
     Or,
     And,
+    If,
+    Else,
     OpenBrace,
     CloseBrace,
     StatementEnd
+}
+
+impl fmt::Display for Token {
+    fn fmt(&self, f : &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Token::None => write!(f, "None"),
+            Token::Number(value) => write!(f, "Number({value})"),
+            Token::Boolean(value) => write!(f, "Bool({value})"),
+            Token::Add => write!(f, "Add"),
+            Token::Subtract => write!(f, "Subtract"),
+            Token::Divide => write!(f, "Divide"),
+            Token::Multiply => write!(f, "Multiply"),
+            Token::Assign => write!(f, "Assign"),
+            Token::Identifier(_) => write!(f, "Identifier"),
+            Token::Equal => write!(f, "Equal"),
+            Token::NotEqual => write!(f, "NotEqual"),
+            Token::Greater => write!(f, "Greater"),
+            Token::Less => write!(f, "Less"),
+            Token::GreaterEqual => write!(f, "GreaterEqual"),
+            Token::LessEqual => write!(f, "LessEqual"),
+            Token::Not => write!(f, "Not"),
+            Token::Or => write!(f, "Or"),
+            Token::And => write!(f, "And"),
+            Token::If => write!(f, "If"),
+            Token::Else => write!(f, "Else"),
+            Token::OpenBrace => write!(f, "OpenBrace"),
+            Token::CloseBrace => write!(f, "CloseBrace"),
+            Token::StatementEnd => write!(f, "StatementEnd")
+        }
+    }
 }
 
 fn read_number(string : &String, pos : &mut usize) -> Token {
@@ -272,15 +466,16 @@ fn copy_token(token : &Token) -> Token {
         Token::And => return Token::And,
         Token::Or => return Token::Or,
         Token::Not => return Token::Not,
-        _ => panic!("Couldn't copy token")
+        Token::If => return Token::If,
+        Token::Else => return Token::Else,
+        _ => panic!("Couldn't copy token {}", *token)
     }
 }
 
 fn read_identifier(string : &String, pos : &mut usize) -> Token {
-    // TODO: if/else
     let keywords : collections::BTreeMap<String, Token> = collections::BTreeMap::from([
-        (String::from("if"), Token::None),
-        (String::from("else"), Token::None),
+        (String::from("if"), Token::If),
+        (String::from("else"), Token::Else),
         (String::from("true"), Token::Boolean(true)),
         (String::from("false"), Token::Boolean(false)),
         (String::from("and"), Token::And),
@@ -324,13 +519,14 @@ fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
 
     while lexer_context.program_index < lexer_context.program.len() {
         let current_char : u8 = lexer_context.program.as_bytes()[lexer_context.program_index];
-        let new_token : Token;
+        let mut new_token : Token = Token::None;
 
         // Read identifier
         if current_char.is_ascii_alphabetic() {
             new_token = read_identifier(&lexer_context.program, &mut lexer_context.program_index);
         } else {
             match current_char {
+                b' ' | b'\n' | b'\t' => {},
                 b'0'..=b'9' | b'.' => {
                     new_token = read_number(&lexer_context.program, &mut lexer_context.program_index);
                     lexer_context.program_index -= 1;
@@ -339,6 +535,8 @@ fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
                 b'-' => new_token = Token::Subtract,
                 b'*' => new_token = Token::Multiply,
                 b'/' => new_token = Token::Divide,
+                b'{' => new_token = Token::OpenBrace,
+                b'}' => new_token = Token::CloseBrace,
                 b'=' => {
                     match lex_peek(&lexer_context) {
                         b'=' => { new_token = Token::Equal; lexer_context.program_index += 1; },
@@ -370,7 +568,12 @@ fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
             }
         }
 
-        tokens.push(new_token);
+        // Read whitespace or something
+        if let Token::None = new_token {}
+        else {
+            tokens.push(new_token);
+        }
+
         lexer_context.program_index += 1;
     }
 
@@ -379,27 +582,27 @@ fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
 
 enum PrecedenceLevels {
     Expression,
-    AddSub,
-    MulDiv,
-    Comparison,
-    Equivalence,
+    Not,
     Or,
     And,
-    Not,
+    Equivalence,
+    Comparison,
+    AddSub,
+    MulDiv,
     Value
 }
 
 impl PrecedenceLevels {
     pub fn higher(value : &PrecedenceLevels) -> PrecedenceLevels {
         match value {
-            PrecedenceLevels::Expression =>     return PrecedenceLevels::AddSub,
-            PrecedenceLevels::AddSub =>         return PrecedenceLevels::MulDiv,
-            PrecedenceLevels::MulDiv =>         return PrecedenceLevels::Comparison,
-            PrecedenceLevels::Comparison =>     return PrecedenceLevels::Equivalence,
-            PrecedenceLevels::Equivalence =>    return PrecedenceLevels::Or,
+            PrecedenceLevels::Expression =>     return PrecedenceLevels::Not,
+            PrecedenceLevels::Not =>            return PrecedenceLevels::Or,
             PrecedenceLevels::Or =>             return PrecedenceLevels::And,
-            PrecedenceLevels::And =>            return PrecedenceLevels::Not,
-            PrecedenceLevels::Not =>            return PrecedenceLevels::Value,
+            PrecedenceLevels::And =>            return PrecedenceLevels::Equivalence,
+            PrecedenceLevels::Equivalence =>    return PrecedenceLevels::Comparison,
+            PrecedenceLevels::Comparison =>     return PrecedenceLevels::AddSub,
+            PrecedenceLevels::AddSub =>         return PrecedenceLevels::MulDiv,
+            PrecedenceLevels::MulDiv =>         return PrecedenceLevels::Value,
             PrecedenceLevels::Value =>          panic!("Can't have higher precedence than value")
         }
     }
@@ -408,6 +611,7 @@ impl PrecedenceLevels {
 fn precedence_value(parser_context : &mut ParserContext) -> Node {
     match &parser_context.token_stream[parser_context.token_index] {
         Token::Number(value) => { parser_context.token_index += 1; return Node::Number(*value) },
+        Token::Boolean(value) => { parser_context.token_index += 1; return Node::Boolean(*value) },
         Token::Identifier(name) => { parser_context.token_index += 1; return Node::Variable(String::from(name)) }
         _ => panic!("Expected number or identifier")
     }
@@ -488,7 +692,7 @@ fn precedence_expression(parser_context : &mut ParserContext, precedence : Prece
                 parser_context.token_index += 1;
 
                 match current_token {
-                    Token::And => lhs = Node::BooleanNot(Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))),
+                    Token::Not => lhs = Node::BooleanNot(Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))),
                     _ => { parser_context.token_index -= 1; return lhs; }
                 }
             },
@@ -512,6 +716,73 @@ fn peek<'a>(token_index : &mut usize, token_stream : &'a Vec<Token>) -> &'a Toke
     return &NULL_TOKEN;
 }
 
+fn parse_compound(parser_context : &mut ParserContext) -> Node {
+    // Read curly brace
+    if let Token::OpenBrace = parser_context.token_stream[parser_context.token_index] {
+        parser_context.token_index += 1;
+    } else {
+        panic!("Expected open brace at start of compound");
+    }
+
+    let mut statements : Vec<Node> = Vec::new();
+
+    // Read statements
+    while parser_context.token_index < parser_context.token_stream.len() {
+        statements.push(statement(parser_context));
+
+        if parser_context.token_index < parser_context.token_stream.len() {
+            let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
+        
+            parser_context.token_index += 1;
+
+            match current_token {
+                Token::StatementEnd => {},
+                Token::CloseBrace => return Node::Compound(statements),
+                _ => panic!("Expected statement ending or closing brace after statement in compound")
+            }
+        }
+    }
+
+    panic!("Never found closing brace, or was incorrectly eaten");
+}
+
+fn parse_if(parser_context : &mut ParserContext) -> Node {
+    // Eat the 'if' token
+    parser_context.token_index += 1;
+    
+    // Read the condition
+    let condition : Node = precedence_expression(parser_context, PrecedenceLevels::Expression);
+    
+    // Read the code block
+    let compound : Node = parse_compound(parser_context);
+
+    // Read else tree if there is one
+    if parser_context.token_index >= parser_context.token_stream.len() {
+        return Node::If(Box::new(condition), Box::new(compound), None);
+    }
+
+    if let Token::Else = parser_context.token_stream[parser_context.token_index] {
+        parser_context.token_index += 1;
+
+        if parser_context.token_index >= parser_context.token_stream.len() {
+            panic!("Expected token after else");
+        }
+
+        // Chain else if
+        if let Token::If = parser_context.token_stream[parser_context.token_index] {
+            return Node::If(Box::new(condition), Box::new(compound), Some(Box::new(parse_if(parser_context))));
+        }
+        // Bare else
+        else {
+            return Node::If(Box::new(condition), Box::new(compound), Some(Box::new(parse_compound(parser_context))));
+        }
+    }
+    // No else
+    else {
+        return Node::If(Box::new(condition), Box::new(compound), None);
+    }
+}
+
 fn statement(parser_context : &mut ParserContext) -> Node {
     while parser_context.token_index < parser_context.token_stream.len() {
         let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
@@ -532,7 +803,8 @@ fn statement(parser_context : &mut ParserContext) -> Node {
                     }
                 }
             } 
-            Token::Number(_) => return precedence_expression(parser_context, PrecedenceLevels::Expression),
+            Token::Number(_) | Token::Boolean(_) => return precedence_expression(parser_context, PrecedenceLevels::Expression),
+            Token::If => return parse_if(parser_context),
             _ => return Node::None
         }
     }
@@ -543,24 +815,8 @@ fn statement(parser_context : &mut ParserContext) -> Node {
 // Build an AST from a token stream
 // Recursive descent parser
 fn parse(parser_context : &mut ParserContext) -> Node {
-    let mut statements : Vec<Node> = Vec::new();
-    
-    while parser_context.token_index < parser_context.token_stream.len() {
-        // Read a statement
-        statements.push(statement(parser_context));
-
-        if parser_context.token_index < parser_context.token_stream.len() {
-            let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
-        
-            // Expect an end token
-            if let Token::StatementEnd = current_token {
-                parser_context.token_index += 1;
-            }
-            else { break; }
-        }
-    }
-    
-    return Node::Compound(statements);
+    // TODO: don't want to require valid programs to be wrapped in curly braces
+    return parse_compound(parser_context);
 }
 
 fn interpret(tree : Node, interpreter_context: &mut InterpreterContext) -> Node {
@@ -568,19 +824,19 @@ fn interpret(tree : Node, interpreter_context: &mut InterpreterContext) -> Node 
 }
 
 fn main() {
-    let mut lexer_context : LexerContext = LexerContext::new(String::from("5*4+4-3"));
+    let mut lexer_context : LexerContext = LexerContext::new(String::from("{ if 5 * 4 == 24 { 5 + 4 } else { 3 + 2 } }"));
     let tokens : Vec<Token> = lex(&mut lexer_context);
 
     let mut parser_context : ParserContext = ParserContext::new(&tokens);
     let tree : Node = parse(&mut parser_context);
-    
+
     let mut memory : collections::BTreeMap<String, Node> = collections::BTreeMap::<String, Node>::new();
     let mut interpreter_context : InterpreterContext = InterpreterContext::new(&mut memory);
     let result : Node = interpret(tree, &mut interpreter_context);
 
-    if let Node::Number(value) = result {
-        println!("Res: {value}");
-    } else {
-        panic!("Interpreter didn't return number");
+    match result {
+        Node::Number(value) => println!("Result is number {value}"),
+        Node::Boolean(value) => println!("Result is bool {value}"),
+        _ => println!("Interpreter didn't return value")
     }
 }
