@@ -1,5 +1,5 @@
 use core::panic;
-use std::collections;
+use std::{collections, fmt::LowerExp, thread::current};
 
 // https://rust-unofficial.github.io/patterns/patterns/behavioural/visitor.html
 
@@ -9,10 +9,20 @@ use std::collections;
 pub enum Node {
     None,
     Number(f32),
+    Boolean(bool),
     BinaryAdd([Box<Node>; 2]),
     BinarySub([Box<Node>; 2]),
     BinaryMul([Box<Node>; 2]),
     BinaryDiv([Box<Node>; 2]),
+    BooleanGreater([Box<Node>; 2]),
+    BooleanGreaterEqual([Box<Node>; 2]),
+    BooleanLessEqual([Box<Node>; 2]),
+    BooleanLess([Box<Node>; 2]),
+    BooleanEqual([Box<Node>; 2]),
+    BooleanNotEqual([Box<Node>; 2]),
+    BooleanNot(Box<Node>),
+    BooleanOr([Box<Node>; 2]),
+    BooleanAnd([Box<Node>; 2]),
     Variable(String),
     Assign(String, Box<Node>),
     Compound(Vec<Node>)
@@ -26,8 +36,7 @@ struct InterpreterContext<'mem> {
 // TODO: Store token stream, token index, memory
 struct ParserContext<'mem> {
     token_stream : &'mem Vec<Token>,
-    token_index: usize,
-    memory : &'mem mut collections::BTreeMap<String, Node>
+    token_index: usize
 }
 
 // TODO: Store code string, string index
@@ -43,8 +52,8 @@ impl LexerContext {
 }
 
 impl ParserContext<'_> {
-    pub fn new<'mem>(token_stream : &'mem Vec<Token>, memory: &'mem mut collections::BTreeMap<String, Node> ) -> ParserContext<'mem> {
-        return ParserContext{token_stream: token_stream, token_index: 0, memory: memory};
+    pub fn new<'mem>(token_stream : &'mem Vec<Token>) -> ParserContext<'mem> {
+        return ParserContext{token_stream: token_stream, token_index: 0 };
     }
 }
 
@@ -67,7 +76,18 @@ fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
         Node::Compound(children) => return visit_compound(children, interpreter_context),
         Node::Number(value) => return Node::Number(*value),
         Node::Variable(string) => return visit_variable(string, interpreter_context),
-        Node::Assign(string, value) => return visit_assign(string, value, interpreter_context), 
+        Node::Assign(string, value) => return visit_assign(string, value, interpreter_context),
+        Node::Boolean(value) => return Node::Boolean(*value),
+        Node::BooleanEqual(children) => return visit_equal(&children[0], &children[1], interpreter_context),
+        Node::BooleanNotEqual(children) => return visit_not_equal(&children[0], &children[1], interpreter_context),
+        Node::BooleanLess(children) => return visit_less(&children[0], &children[1], interpreter_context),
+        Node::BooleanLessEqual(children) => return visit_less_equal(&children[0], &children[1], interpreter_context),
+        Node::BooleanGreater(children) => return visit_more(&children[0], &children[1], interpreter_context),
+        Node::BooleanGreaterEqual(children) => return visit_more_equal(&children[0], &children[1], interpreter_context),
+        // TODO
+        Node::BooleanOr(children) => return Node::None,
+        Node::BooleanAnd(children) => return Node::None,
+        Node::BooleanNot(node) => return Node::None,
         Node::None => return Node::None
     }
 }
@@ -120,6 +140,44 @@ fn visit_binary_number(left: &Node, right: &Node, interpreter_context: &mut Inte
     panic!("One side of binary add was invalid");
 }
 
+fn visit_less(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
+
+    return Node::Boolean(values[0] < values[1]);
+}
+
+fn visit_more(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
+
+    return Node::Boolean(values[0] > values[1]);
+}
+
+fn visit_less_equal(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
+
+    return Node::Boolean(values[0] <= values[1]);
+}
+
+fn visit_more_equal(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
+
+    return Node::Boolean(values[0] >= values[1]);
+}
+
+fn visit_equal(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    // TODO: could be f32/bool
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
+
+    return Node::Boolean(values[0] == values[1]);
+}
+
+fn visit_not_equal(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
+    // TODO: could be f32/bool
+    let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
+
+    return Node::Boolean(values[0] != values[1]);
+}
+
 fn visit_add(left: &Node, right: &Node, interpreter_context: &mut InterpreterContext) -> Node {
     let values: [f32; 2] = visit_binary_number(left, right, interpreter_context);
 
@@ -147,9 +205,24 @@ fn visit_mul(left: &Node, right: &Node, interpreter_context: &mut InterpreterCon
 enum Token {
     None,
     Number(f32),
-    Operator(u8),
+    Boolean(bool),
+    Add,
+    Subtract,
+    Divide,
+    Multiply,
     Assign,
     Identifier(String),
+    Equal,
+    NotEqual,
+    Greater,
+    Less,
+    GreaterEqual,
+    LessEqual,
+    Not,
+    Or,
+    And,
+    OpenBrace,
+    CloseBrace,
     StatementEnd
 }
 
@@ -192,7 +265,29 @@ fn read_number(string : &String, pos : &mut usize) -> Token {
     panic!("Didn't read integer, or reached EOF");
 }
 
+fn copy_token(token : &Token) -> Token {
+    match token {
+        Token::None => return Token::None,
+        Token::Boolean(value) => return Token::Boolean(*value),
+        Token::And => return Token::And,
+        Token::Or => return Token::Or,
+        Token::Not => return Token::Not,
+        _ => panic!("Couldn't copy token")
+    }
+}
+
 fn read_identifier(string : &String, pos : &mut usize) -> Token {
+    // TODO: if/else
+    let keywords : collections::BTreeMap<String, Token> = collections::BTreeMap::from([
+        (String::from("if"), Token::None),
+        (String::from("else"), Token::None),
+        (String::from("true"), Token::Boolean(true)),
+        (String::from("false"), Token::Boolean(false)),
+        (String::from("and"), Token::And),
+        (String::from("or"), Token::Or),
+        (String::from("not"), Token::Not)
+    ]);
+
     let start: usize = *pos;
     
     while *pos < string.len() {
@@ -206,10 +301,22 @@ fn read_identifier(string : &String, pos : &mut usize) -> Token {
     }
 
     let identifier: String = String::from(&string[start..*pos]);
-    
     *pos -= 1;
+    
+    match keywords.get(&identifier) {
+        Some(value) => return copy_token(value),
+        None => return Token::Identifier(identifier)
+    }
+}
 
-    return Token::Identifier(identifier);
+fn lex_peek(lexer_context : &LexerContext) -> u8 {
+    let next_index : usize = lexer_context.program_index + 1;
+
+    if next_index < lexer_context.program.len() {
+        return lexer_context.program.as_bytes()[next_index];
+    } else {
+        return b'\0';
+    }
 }
 
 fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
@@ -217,110 +324,176 @@ fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
 
     while lexer_context.program_index < lexer_context.program.len() {
         let current_char : u8 = lexer_context.program.as_bytes()[lexer_context.program_index];
+        let new_token : Token;
 
         // Read identifier
         if current_char.is_ascii_alphabetic() {
-            tokens.push(read_identifier(&lexer_context.program, &mut lexer_context.program_index));
+            new_token = read_identifier(&lexer_context.program, &mut lexer_context.program_index);
         } else {
             match current_char {
                 b'0'..=b'9' | b'.' => {
-                    tokens.push(read_number(&lexer_context.program, &mut lexer_context.program_index));
+                    new_token = read_number(&lexer_context.program, &mut lexer_context.program_index);
                     lexer_context.program_index -= 1;
                 }
-                b'+' | b'-' | b'*' | b'/' => {
-                    tokens.push(Token::Operator(current_char));
-                }
+                b'+' => new_token = Token::Add,
+                b'-' => new_token = Token::Subtract,
+                b'*' => new_token = Token::Multiply,
+                b'/' => new_token = Token::Divide,
                 b'=' => {
-                    tokens.push(Token::Assign);
+                    match lex_peek(&lexer_context) {
+                        b'=' => { new_token = Token::Equal; lexer_context.program_index += 1; },
+                        _ => new_token = Token::Assign
+                    }
+                }
+                b'<' => {
+                    match lex_peek(&lexer_context) {
+                        b'=' => { new_token = Token::LessEqual; lexer_context.program_index += 1; },
+                        _ => new_token = Token::Less,
+                    }
+                }
+                b'>' => {
+                    match lex_peek(&lexer_context) {
+                        b'=' => { new_token = Token::GreaterEqual; lexer_context.program_index += 1; },
+                        _ => new_token = Token::Greater,
+                    }
+                }
+                b'!' => {
+                    match lex_peek(&lexer_context) {
+                        b'=' => { new_token = Token::NotEqual; lexer_context.program_index += 1; },
+                        _ => panic!("Unknown token '!{current_char}'")
+                    }
                 }
                 b';' => {
-                    tokens.push(Token::StatementEnd);
+                    new_token = Token::StatementEnd;
                 }
-                _ => {}
+                _ => panic!("Couldn't match character: {current_char}")
             }
         }
 
+        tokens.push(new_token);
         lexer_context.program_index += 1;
     }
 
     return tokens;
 }
 
-
-// TODO: parser shouldn't have to access memory other than to assign value
-fn factor(token_index : &mut usize, token_stream : &Vec<Token>, memory : &mut collections::BTreeMap<String, Node>) -> Node {
-    if let Token::Number(value) = token_stream[*token_index] {
-        *token_index += 1;
-
-        return Node::Number(value);
-    }
-    else if let Token::Identifier(name) = &token_stream[*token_index] {
-        *token_index += 1;
-
-        return Node::Variable(String::from(name));
-    }
-
-    panic!("Expected number or identifier");
+enum PrecedenceLevels {
+    Expression,
+    AddSub,
+    MulDiv,
+    Comparison,
+    Equivalence,
+    Or,
+    And,
+    Not,
+    Value
 }
 
-fn term(token_index : &mut usize, token_stream : &Vec<Token>, memory : &mut collections::BTreeMap<String, Node>) -> Node {
-    let mut lhs: Node = factor(token_index, token_stream, memory);
-
-    if *token_index >= token_stream.len() {
-        return lhs;
-    }
-
-    let mut current_token : &Token = &token_stream[*token_index];
-    
-    while *token_index < token_stream.len() {
-        current_token = &token_stream[*token_index];
-
-        if let Token::Operator(operator_type) = current_token {
-            match operator_type {
-                b'*' => {
-                    *token_index += 1;
-                    lhs = Node::BinaryMul([Box::new(lhs), Box::new(factor(token_index, token_stream, memory))]);
-                },
-                b'/' => {
-                    *token_index += 1;
-                    lhs = Node::BinaryDiv([Box::new(lhs), Box::new(factor(token_index, token_stream, memory))]);
-                },
-                _ => return lhs
-            }
-        } else {
-            return lhs;
+impl PrecedenceLevels {
+    pub fn higher(value : &PrecedenceLevels) -> PrecedenceLevels {
+        match value {
+            PrecedenceLevels::Expression =>     return PrecedenceLevels::AddSub,
+            PrecedenceLevels::AddSub =>         return PrecedenceLevels::MulDiv,
+            PrecedenceLevels::MulDiv =>         return PrecedenceLevels::Comparison,
+            PrecedenceLevels::Comparison =>     return PrecedenceLevels::Equivalence,
+            PrecedenceLevels::Equivalence =>    return PrecedenceLevels::Or,
+            PrecedenceLevels::Or =>             return PrecedenceLevels::And,
+            PrecedenceLevels::And =>            return PrecedenceLevels::Not,
+            PrecedenceLevels::Not =>            return PrecedenceLevels::Value,
+            PrecedenceLevels::Value =>          panic!("Can't have higher precedence than value")
         }
     }
-
-    return lhs;
 }
 
-fn expression(token_index : &mut usize, token_stream: &Vec<Token>, memory : &mut collections::BTreeMap<String, Node>) -> Node {
-    let mut lhs: Node = term(token_index, token_stream, memory);
+fn precedence_value(parser_context : &mut ParserContext) -> Node {
+    match &parser_context.token_stream[parser_context.token_index] {
+        Token::Number(value) => { parser_context.token_index += 1; return Node::Number(*value) },
+        Token::Identifier(name) => { parser_context.token_index += 1; return Node::Variable(String::from(name)) }
+        _ => panic!("Expected number or identifier")
+    }
+}
 
-    if *token_index >= token_stream.len() {
+fn precedence_expression(parser_context : &mut ParserContext, precedence : PrecedenceLevels) -> Node {
+    // Base case for recursion
+    if let PrecedenceLevels::Value = precedence {
+        // Read a value
+        return precedence_value(parser_context);
+    }
+
+    let mut lhs : Node = precedence_expression(parser_context, PrecedenceLevels::higher(&precedence));
+
+    if parser_context.token_index >= parser_context.token_stream.len() {
         return lhs;
     }
 
-    let mut current_token : &Token = &token_stream[*token_index];
-    
-    while *token_index < token_stream.len() {
-        current_token = &token_stream[*token_index];
+    while parser_context.token_index < parser_context.token_stream.len() {
+        let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
 
-        if let Token::Operator(operator_type) = current_token {
-            match operator_type {
-                b'+' => {
-                    *token_index += 1;
-                    lhs = Node::BinaryAdd([Box::new(lhs), Box::new(term(token_index, token_stream, memory))]);
-                },
-                b'-' => {
-                    *token_index += 1;
-                    lhs = Node::BinarySub([Box::new(lhs), Box::new(term(token_index, token_stream, memory))]);
-                },
-                _ => return lhs
-            }
-        } else {
-            return lhs;
+        match precedence {
+            PrecedenceLevels::AddSub => {
+                parser_context.token_index += 1;
+
+                match current_token {
+                    Token::Add => lhs = Node::BinaryAdd([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    Token::Subtract => lhs = Node::BinarySub([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    _ => { parser_context.token_index -= 1; return lhs; }
+                }
+            },
+            PrecedenceLevels::MulDiv => {
+                parser_context.token_index += 1;
+
+                match current_token {
+                    Token::Multiply => lhs = Node::BinaryMul([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    Token::Divide => lhs = Node::BinaryDiv([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    _ => { parser_context.token_index -= 1; return lhs; }
+                }
+            },
+            PrecedenceLevels::Comparison => {
+                parser_context.token_index += 1;
+
+                match current_token {
+                    Token::Greater => lhs = Node::BooleanGreater([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    Token::GreaterEqual => lhs = Node::BooleanGreaterEqual([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    Token::Less => lhs = Node::BooleanLess([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    Token::LessEqual => lhs = Node::BooleanLessEqual([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    _ => { parser_context.token_index -= 1; return lhs; }
+                }
+            },
+            PrecedenceLevels::Equivalence => {
+                parser_context.token_index += 1;
+
+                match current_token {
+                    Token::Equal => lhs = Node::BooleanEqual([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    Token::NotEqual => lhs = Node::BooleanNotEqual([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    _ => { parser_context.token_index -= 1; return lhs; }
+                }
+            },
+            PrecedenceLevels::Or => {
+                parser_context.token_index += 1;
+
+                match current_token {
+                    Token::Or => lhs = Node::BooleanOr([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    _ => { parser_context.token_index -= 1; return lhs; }
+                }
+            },
+            PrecedenceLevels::And => {
+                parser_context.token_index += 1;
+
+                match current_token {
+                    Token::And => lhs = Node::BooleanAnd([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    _ => { parser_context.token_index -= 1; return lhs; }
+                }
+            },
+            PrecedenceLevels::Not => {
+                parser_context.token_index += 1;
+
+                match current_token {
+                    Token::And => lhs = Node::BooleanNot(Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))),
+                    _ => { parser_context.token_index -= 1; return lhs; }
+                }
+            },
+            PrecedenceLevels::Expression => return lhs,
+            _ => panic!("Invalid precedence")
         }
     }
 
@@ -339,29 +512,27 @@ fn peek<'a>(token_index : &mut usize, token_stream : &'a Vec<Token>) -> &'a Toke
     return &NULL_TOKEN;
 }
 
-fn statement(token_index : &mut usize, token_stream: &Vec<Token>, memory : &mut collections::BTreeMap<String, Node>) -> Node {
-    while *token_index < token_stream.len() {
-        let current_token : &Token = &token_stream[*token_index];
+fn statement(parser_context : &mut ParserContext) -> Node {
+    while parser_context.token_index < parser_context.token_stream.len() {
+        let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
 
         // TODO: badly formed right now
         match current_token {
             Token::Identifier(name) => {
-                let next_token : &Token = peek(token_index, token_stream);
-                
-                match next_token {
+                match peek(&mut parser_context.token_index, parser_context.token_stream) {
                     Token::Assign => {
-                        *token_index += 2;
+                        parser_context.token_index += 2;
 
-                        let rhs: Node = expression(token_index, token_stream, memory);
+                        let rhs: Node = precedence_expression(parser_context, PrecedenceLevels::Expression);
 
                         return Node::Assign(String::from(name), Box::new(rhs));
                     },
                     _ => {
-                        return expression(token_index, token_stream, memory);
+                        return precedence_expression(parser_context, PrecedenceLevels::Expression);
                     }
                 }
             } 
-            Token::Number(_) => return expression(token_index, token_stream, memory),
+            Token::Number(_) => return precedence_expression(parser_context, PrecedenceLevels::Expression),
             _ => return Node::None
         }
     }
@@ -376,7 +547,7 @@ fn parse(parser_context : &mut ParserContext) -> Node {
     
     while parser_context.token_index < parser_context.token_stream.len() {
         // Read a statement
-        statements.push(statement(&mut parser_context.token_index, parser_context.token_stream, &mut parser_context.memory));
+        statements.push(statement(parser_context));
 
         if parser_context.token_index < parser_context.token_stream.len() {
             let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
@@ -397,11 +568,13 @@ fn interpret(tree : Node, interpreter_context: &mut InterpreterContext) -> Node 
 }
 
 fn main() {
-    let mut lexer_context : LexerContext = LexerContext::new(String::from("x=5+3;x=x+2;x=x/2"));
+    let mut lexer_context : LexerContext = LexerContext::new(String::from("5*4+4-3"));
     let tokens : Vec<Token> = lex(&mut lexer_context);
-    let mut memory : collections::BTreeMap<String, Node> = collections::BTreeMap::<String, Node>::new();
-    let mut parser_context : ParserContext = ParserContext::new(&tokens, &mut memory);
+
+    let mut parser_context : ParserContext = ParserContext::new(&tokens);
     let tree : Node = parse(&mut parser_context);
+    
+    let mut memory : collections::BTreeMap<String, Node> = collections::BTreeMap::<String, Node>::new();
     let mut interpreter_context : InterpreterContext = InterpreterContext::new(&mut memory);
     let result : Node = interpret(tree, &mut interpreter_context);
 
