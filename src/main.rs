@@ -17,6 +17,7 @@ enum Node {
     BinarySub([Box<Node>; 2]),
     BinaryMul([Box<Node>; 2]),
     BinaryDiv([Box<Node>; 2]),
+    UnaryNegation(Box<Node>),
     BooleanGreater([Box<Node>; 2]),
     BooleanGreaterEqual([Box<Node>; 2]),
     BooleanLessEqual([Box<Node>; 2]),
@@ -45,6 +46,7 @@ impl fmt::Display for Node {
             Node::BinarySub(_) => write!(f, "Subtract"),
             Node::BinaryMul(_) => write!(f, "Multiply"),
             Node::BinaryDiv(_) => write!(f, "Divide"),
+            Node::UnaryNegation(_) => write!(f, "Negation"),
             Node::BooleanGreater(_) => write!(f, "Greater"),
             Node::BooleanGreaterEqual(_) => write!(f, "GreaterEqual"),
             Node::BooleanLessEqual(_) => write!(f, "LessEqual"),
@@ -104,6 +106,7 @@ fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
         Node::BinarySub(children)           => return visit_sub(&children[0], &children[1], interpreter_context),
         Node::BinaryMul(children)           => return visit_mul(&children[0], &children[1], interpreter_context),
         Node::BinaryDiv(children)           => return visit_div(&children[0], &children[1], interpreter_context),
+        Node::UnaryNegation(value)          => return visit_unary_negation(value, interpreter_context),
         Node::Compound(children)            => return visit_compound(children, interpreter_context),
         Node::Number(value)                 => return Node::Number(*value),
         Node::Variable(string)              => return visit_variable(string, interpreter_context),
@@ -135,6 +138,15 @@ fn string_convert(node : Node) -> String {
         Node::Number(value) => return value.to_string(),
         Node::Boolean(value) => return value.to_string(),
         _ => panic!("No string conversion available for {node}")
+    }
+}
+
+fn visit_unary_negation(node : &Node, interpreter_context : &mut InterpreterContext) -> Node {
+    let visited_node = visit(node, interpreter_context);
+    
+    match visited_node {
+        Node::Number(value) => return Node::Number(-value),
+        _ => panic!("Cannot negate non-number node {node}") 
     }
 }
 
@@ -462,6 +474,8 @@ enum Token {
     Else,
     OpenBrace,
     CloseBrace,
+    OpenParen,
+    CloseParen,
     StatementEnd
 }
 
@@ -492,6 +506,8 @@ impl fmt::Display for Token {
             Token::Else => write!(f, "Else"),
             Token::OpenBrace => write!(f, "OpenBrace"),
             Token::CloseBrace => write!(f, "CloseBrace"),
+            Token::OpenParen => write!(f, "OpenParen"),
+            Token::CloseParen => write!(f, "CloseParen"),
             Token::StatementEnd => write!(f, "StatementEnd")
         }
     }
@@ -671,6 +687,8 @@ fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
                 b'/' => new_token = Token::Divide,
                 b'{' => new_token = Token::OpenBrace,
                 b'}' => new_token = Token::CloseBrace,
+                b'(' => new_token = Token::OpenParen,
+                b')' => new_token = Token::CloseParen,
                 b'=' => {
                     match lex_peek(&lexer_context) {
                         b'=' => { new_token = Token::Equal; lexer_context.program_index += 1; },
@@ -749,13 +767,29 @@ impl PrecedenceLevels {
 }
 
 fn precedence_value(parser_context : &mut ParserContext) -> Node {
-    match &parser_context.token_stream[parser_context.token_index] {
-        Token::Number(value) => { parser_context.token_index += 1; return Node::Number(*value) },
-        Token::Boolean(value) => { parser_context.token_index += 1; return Node::Boolean(*value) },
-        Token::Identifier(name) => { parser_context.token_index += 1; return Node::Variable(String::from(name)) },
-        Token::String(value) => { parser_context.token_index += 1; return Node::String(String::from(value)) },
-        Token::InterpolatedString(value) => { parser_context.token_index += 1; return Node::InterpolatedString(String::from(value)) },
-        _ => panic!("Expected number or identifier")
+    let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
+    
+    parser_context.token_index += 1;
+
+    match current_token {
+        Token::Number(value) => return Node::Number(*value),
+        Token::Boolean(value) => return Node::Boolean(*value),
+        Token::Identifier(name) => return Node::Variable(String::from(name)),
+        Token::String(value) => return Node::String(String::from(value)),
+        Token::InterpolatedString(value) => return Node::InterpolatedString(String::from(value)),
+        Token::Subtract => return Node::UnaryNegation(Box::new(precedence_value(parser_context))),
+        Token::OpenParen => {
+            let inner_expression : Node = precedence_expression(parser_context, PrecedenceLevels::Expression);
+
+            if let Token::CloseParen = parser_context.token_stream[parser_context.token_index] {
+                parser_context.token_index += 1;
+            } else {
+                panic!("Expected closing parenthesis");
+            }
+
+            return inner_expression;
+        }
+        _ => { parser_context.token_index -= 1; panic!("Expected number or identifier") }
     }
 }
 
@@ -776,21 +810,22 @@ fn precedence_expression(parser_context : &mut ParserContext, precedence : Prece
         let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
 
         match precedence {
-            PrecedenceLevels::AddSub => {
-                parser_context.token_index += 1;
-
-                match current_token {
-                    Token::Add => lhs = Node::BinaryAdd([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
-                    Token::Subtract => lhs = Node::BinarySub([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
-                    _ => { parser_context.token_index -= 1; return lhs; }
-                }
-            },
+            PrecedenceLevels::Value => panic!("Should never reach value arm of expression parser"),
             PrecedenceLevels::MulDiv => {
                 parser_context.token_index += 1;
 
                 match current_token {
                     Token::Multiply => lhs = Node::BinaryMul([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
                     Token::Divide => lhs = Node::BinaryDiv([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    _ => { parser_context.token_index -= 1; return lhs; }
+                }
+            },
+            PrecedenceLevels::AddSub => {
+                parser_context.token_index += 1;
+
+                match current_token {
+                    Token::Add => lhs = Node::BinaryAdd([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    Token::Subtract => lhs = Node::BinarySub([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
                     _ => { parser_context.token_index -= 1; return lhs; }
                 }
             },
@@ -814,19 +849,19 @@ fn precedence_expression(parser_context : &mut ParserContext, precedence : Prece
                     _ => { parser_context.token_index -= 1; return lhs; }
                 }
             },
-            PrecedenceLevels::Or => {
-                parser_context.token_index += 1;
-
-                match current_token {
-                    Token::Or => lhs = Node::BooleanOr([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
-                    _ => { parser_context.token_index -= 1; return lhs; }
-                }
-            },
             PrecedenceLevels::And => {
                 parser_context.token_index += 1;
 
                 match current_token {
                     Token::And => lhs = Node::BooleanAnd([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
+                    _ => { parser_context.token_index -= 1; return lhs; }
+                }
+            },
+            PrecedenceLevels::Or => {
+                parser_context.token_index += 1;
+
+                match current_token {
+                    Token::Or => lhs = Node::BooleanOr([Box::new(lhs), Box::new(precedence_expression(parser_context, PrecedenceLevels::higher(&precedence)))]),
                     _ => { parser_context.token_index -= 1; return lhs; }
                 }
             },
@@ -838,8 +873,7 @@ fn precedence_expression(parser_context : &mut ParserContext, precedence : Prece
                     _ => { parser_context.token_index -= 1; return lhs; }
                 }
             },
-            PrecedenceLevels::Expression => return lhs,
-            _ => panic!("Invalid precedence")
+            PrecedenceLevels::Expression => return lhs
         }
     }
 
@@ -945,7 +979,14 @@ fn statement(parser_context : &mut ParserContext) -> Node {
                     }
                 }
             },
-            Token::Number(_) | Token::Boolean(_) | Token::String(_) | Token::InterpolatedString(_) => return precedence_expression(parser_context, PrecedenceLevels::Expression),
+            // Any LHS value, including unary negation
+            Token::Number(_)                |
+            Token::Boolean(_)               |
+            Token::String(_)                |
+            Token::InterpolatedString(_)    |
+            Token::Subtract                 |
+            Token::OpenParen                => return precedence_expression(parser_context, PrecedenceLevels::Expression),
+            
             Token::If => return parse_if(parser_context),
             _ => return Node::None
         }
@@ -966,7 +1007,7 @@ fn interpret(tree : Node, interpreter_context: &mut InterpreterContext) -> Node 
 }
 
 fn main() {
-    let mut lexer_context : LexerContext = LexerContext::new(String::from("{ `Hello {5 * 3} hey` }"));
+    let mut lexer_context : LexerContext = LexerContext::new(String::from("{ (5 + 4) * 3 }"));
     let tokens : Vec<Token> = lex(&mut lexer_context);
 
     let mut i : usize = 0;
