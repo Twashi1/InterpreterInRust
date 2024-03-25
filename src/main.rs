@@ -1,5 +1,5 @@
 use core::{fmt, panic};
-use std::{collections, slice::SliceIndex};
+use std::{collections, io::{stdin, Write}};
 
 // https://rust-unofficial.github.io/patterns/patterns/behavioural/visitor.html
 
@@ -31,6 +31,8 @@ enum Node {
     Assign(String, Box<Node>),
     // Condition, then compound, then else tree
     If(Box<Node>, Box<Node>, Option<Box<Node>>),
+    Display(Box<Node>),
+    Prompt(Box<Node>),
     Compound(Vec<Node>)
 }
 
@@ -59,6 +61,8 @@ impl fmt::Display for Node {
             Node::Variable(_) => write!(f, "Variable"),
             Node::Assign(_, _) => write!(f, "Assign"),
             Node::If(_, _, _) => write!(f, "If"),
+            Node::Display(_) => write!(f, "Display"),
+            Node::Prompt(_) => write!(f, "Prompt"),
             Node::Compound(_) => write!(f, "Compound"),
         }
     }
@@ -124,6 +128,8 @@ fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
         Node::BooleanAnd(children)          => return visit_and(&children[0], &children[1], interpreter_context),
         Node::BooleanNot(node)              => return visit_not(&node, interpreter_context),
         Node::If(condition, compound, tree) => return visit_if(&condition, &compound, &tree, interpreter_context),
+        Node::Display(node)                 => return visit_display(node, interpreter_context),
+        Node::Prompt(node)                  => return visit_prompt(node, interpreter_context),
         Node::None                          => return Node::None
     }
 }
@@ -132,12 +138,44 @@ type BinaryNumberFunction = fn(f32, f32) -> Node;
 type BinaryBooleanFunction = fn(bool, bool) -> Node;
 type BinaryFunctionTuple = (Option<BinaryBooleanFunction>, Option<BinaryNumberFunction>);
 
-fn string_convert(node : Node) -> String {
+fn string_convert(node : &Node) -> String {
     match node {
         Node::String(value) => return String::from(value),
         Node::Number(value) => return value.to_string(),
         Node::Boolean(value) => return value.to_string(),
         _ => panic!("No string conversion available for {node}")
+    }
+}
+
+fn visit_display(node : &Node, interpreter_context : &mut InterpreterContext) -> Node {
+    let visited_node : Node = visit(node, interpreter_context);
+
+    let text : String = string_convert(&visited_node);
+
+    print!("{text}");
+
+    return visited_node;
+}
+
+fn visit_prompt(node : &Node, interpreter_context : &mut InterpreterContext) -> Node {
+    let visited_node : Node = visit(node, interpreter_context);
+
+    let text : String = string_convert(&visited_node);
+
+    print!("{text}");
+
+    match std::io::stdout().flush() {
+        Ok(_) => {},
+        Err(e) => panic!("Error: {e}")
+    }
+
+    let mut input_buffer = String::new();
+
+    match stdin().read_line(&mut input_buffer) {
+        Ok(_) => {
+            return Node::String(String::from(input_buffer.trim_end()));
+        },
+        Err(e) => panic!("Error: {e}")
     }
 }
 
@@ -183,7 +221,7 @@ fn visit_interpolated_string(value : &String, interpreter_context : &mut Interpr
                     let tree : Node = parse(&mut parser_context);
 
                     let result : Node = visit(&tree, interpreter_context);
-                    let string_result : String = string_convert(result);
+                    let string_result : String = string_convert(&result);
 
                     let mut new_string : String = String::from(&operating_string[0..start_index]);
                     new_string.push_str(&string_result);
@@ -476,6 +514,8 @@ enum Token {
     CloseBrace,
     OpenParen,
     CloseParen,
+    Display,
+    Prompt,
     StatementEnd
 }
 
@@ -508,6 +548,8 @@ impl fmt::Display for Token {
             Token::CloseBrace => write!(f, "CloseBrace"),
             Token::OpenParen => write!(f, "OpenParen"),
             Token::CloseParen => write!(f, "CloseParen"),
+            Token::Display => write!(f, "Display"),
+            Token::Prompt => write!(f, "Prompt"),
             Token::StatementEnd => write!(f, "StatementEnd")
         }
     }
@@ -561,6 +603,8 @@ fn copy_token(token : &Token) -> Token {
         Token::Not => return Token::Not,
         Token::If => return Token::If,
         Token::Else => return Token::Else,
+        Token::Display => return Token::Display,
+        Token::Prompt => return Token::Prompt,
         _ => panic!("Couldn't copy token {}", *token)
     }
 }
@@ -573,7 +617,9 @@ fn read_identifier(string : &String, pos : &mut usize) -> Token {
         (String::from("false"), Token::Boolean(false)),
         (String::from("and"), Token::And),
         (String::from("or"), Token::Or),
-        (String::from("not"), Token::Not)
+        (String::from("not"), Token::Not),
+        (String::from("display"), Token::Display),
+        (String::from("prompt"), Token::Prompt)
     ]);
 
     let start: usize = *pos;
@@ -620,10 +666,7 @@ fn read_string(string : &String, pos : &mut usize) -> Token {
         *pos += 1;
     }
 
-    // Jump past ending quotation mark
-    *pos += 1;
-
-    return Token::String(String::from(&string[start..*pos - 1]));
+    return Token::String(String::from(&string[start..*pos]));
 }
 
 fn read_istring(string : &String, pos : &mut usize) -> Token {
@@ -649,9 +692,7 @@ fn read_istring(string : &String, pos : &mut usize) -> Token {
         *pos += 1;
     }
 
-    *pos += 1;
-
-    return Token::InterpolatedString(String::from(&string[start..*pos - 1]));
+    return Token::InterpolatedString(String::from(&string[start..*pos]));
 }
 
 fn lex_peek(lexer_context : &LexerContext) -> u8 {
@@ -778,6 +819,8 @@ fn precedence_value(parser_context : &mut ParserContext) -> Node {
         Token::String(value) => return Node::String(String::from(value)),
         Token::InterpolatedString(value) => return Node::InterpolatedString(String::from(value)),
         Token::Subtract => return Node::UnaryNegation(Box::new(precedence_value(parser_context))),
+        Token::Prompt => return Node::Prompt(Box::new(precedence_expression(parser_context, PrecedenceLevels::Expression))),
+        Token::Display => return Node::Display(Box::new(precedence_expression(parser_context, PrecedenceLevels::Expression))),
         Token::OpenParen => {
             let inner_expression : Node = precedence_expression(parser_context, PrecedenceLevels::Expression);
 
@@ -985,8 +1028,9 @@ fn statement(parser_context : &mut ParserContext) -> Node {
             Token::String(_)                |
             Token::InterpolatedString(_)    |
             Token::Subtract                 |
+            Token::Display                  |
+            Token::Prompt                   |
             Token::OpenParen                => return precedence_expression(parser_context, PrecedenceLevels::Expression),
-            
             Token::If => return parse_if(parser_context),
             _ => return Node::None
         }
@@ -1007,7 +1051,7 @@ fn interpret(tree : Node, interpreter_context: &mut InterpreterContext) -> Node 
 }
 
 fn main() {
-    let mut lexer_context : LexerContext = LexerContext::new(String::from("{ (5 + 4) * 3 }"));
+    let mut lexer_context : LexerContext = LexerContext::new(String::from("{ x = prompt `Enter your name: `; display `Hi {x}\n` }"));
     let tokens : Vec<Token> = lex(&mut lexer_context);
 
     let mut i : usize = 0;
