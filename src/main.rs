@@ -1,11 +1,10 @@
 use core::{fmt, panic};
-use std::{collections, io::{stdin, Write}};
+use std::{collections, io::{stdin, Write}, fs, env};
 
 // https://rust-unofficial.github.io/patterns/patterns/behavioural/visitor.html
 
 // TODO: could extend number to integer, float, etc.
 //      maybe from that figure out traits to more easily perform operations
-// TODO: remove pub, i think only needed because was in some namespace before
 
 enum Node {
     None,
@@ -100,9 +99,6 @@ impl InterpreterContext<'_> {
     }
 }
 
-// TODO: proper "advance" and "peek" functions for lexer/parser/interpreter
-// TODO: multi-file project probably soon (or at least namespaces for lexer/parser/interpreter)
-
 // Switch and call correct visitor method
 fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
     match n {
@@ -136,7 +132,8 @@ fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
 
 type BinaryNumberFunction = fn(f32, f32) -> Node;
 type BinaryBooleanFunction = fn(bool, bool) -> Node;
-type BinaryFunctionTuple = (Option<BinaryBooleanFunction>, Option<BinaryNumberFunction>);
+type BinaryStringFunction = fn(String, String) -> Node;
+type BinaryFunctionTuple = (Option<BinaryBooleanFunction>, Option<BinaryNumberFunction>, Option<BinaryStringFunction>);
 
 fn string_convert(node : &Node) -> String {
     match node {
@@ -189,10 +186,6 @@ fn visit_unary_negation(node : &Node, interpreter_context : &mut InterpreterCont
 }
 
 fn visit_interpolated_string(value : &String, interpreter_context : &mut InterpreterContext) -> Node {
-    // TODO: extract the formatted parts
-    // TODO: build lex and parser for each (seems really time-consuming)
-    // TODO: then we lex and parse the formatted parts
-    // TODO: then we can interpret the contents using the existing interpreter context
     let mut operating_string : String = String::from(value);
     let mut start_index : usize = usize::MAX;
     let mut current_index : usize = 0;
@@ -245,7 +238,6 @@ fn visit_interpolated_string(value : &String, interpreter_context : &mut Interpr
     return Node::String(operating_string);
 }
 
-// TODO: string binary operations
 fn visit_binary_operation(lhs: &Node, rhs: &Node, functions : BinaryFunctionTuple, interpreter_context : &mut InterpreterContext) -> Node {
     let lhs_visited : Node = visit(lhs, interpreter_context);
     let rhs_visited : Node = visit(rhs, interpreter_context);
@@ -271,12 +263,22 @@ fn visit_binary_operation(lhs: &Node, rhs: &Node, functions : BinaryFunctionTupl
                 // TODO: 0 is a bit of a magic number
                 match functions.0 {
                     Some(function) => return function(lhs_value, rhs_value),
-                    None => panic!("No function existed for two number inputs")
+                    None => panic!("No function existed for two boolean inputs")
                 }
             } else {
                 panic!("Expected two of same type for binary operation, lhs was {lhs_visited}, rhs was {rhs_visited}");
             }
         },
+        Node::String(lhs_value) => {
+            if let Node::String(rhs_value) = rhs_visited {
+                match functions.2 {
+                    Some(function) => return function(lhs_value, rhs_value),
+                    None => panic!("No function existed for two string inputs")
+                }
+            } else {
+                panic!("Expected two of same type for binary operation, lhs was borrow checker fun, rhs was {rhs_visited}");
+            }
+        }
         _ => panic!("Expected value type")
     }
 }
@@ -315,6 +317,7 @@ fn visit_or(left: &Node, right: &Node, interpreter_context : &mut InterpreterCon
         right,
         (
             Some(|a : bool, b : bool| -> Node { return Node::Boolean(a || b); }),
+            None,
             None
         ),
         interpreter_context
@@ -327,6 +330,7 @@ fn visit_and(left: &Node, right: &Node, interpreter_context : &mut InterpreterCo
         right,
         (
             Some(|a : bool, b : bool| -> Node { return Node::Boolean(a && b); }),
+            None,
             None
         ),
         interpreter_context
@@ -373,7 +377,8 @@ fn visit_less(left: &Node, right: &Node, interpreter_context: &mut InterpreterCo
         right,
         (
             None,
-            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a < b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a < b); }),
+            Some(|a : String, b : String| -> Node { return Node::Boolean(a < b); })
         ),
         interpreter_context
     );
@@ -385,7 +390,8 @@ fn visit_more(left: &Node, right: &Node, interpreter_context: &mut InterpreterCo
         right,
         (
             None,
-            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a > b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a > b); }),
+            Some(|a : String, b : String| -> Node { return Node::Boolean(a > b); })
         ),
         interpreter_context
     );
@@ -397,7 +403,8 @@ fn visit_less_equal(left: &Node, right: &Node, interpreter_context: &mut Interpr
         right,
         (
             None,
-            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a <= b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a <= b); }),
+            Some(|a : String, b : String| -> Node { return Node::Boolean(a <= b); })
         ),
         interpreter_context
     );
@@ -409,7 +416,8 @@ fn visit_more_equal(left: &Node, right: &Node, interpreter_context: &mut Interpr
         right,
         (
             None,
-            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a >= b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a >= b); }),
+            Some(|a : String, b : String| -> Node { return Node::Boolean(a >= b); })
         ),
         interpreter_context
     );
@@ -421,7 +429,8 @@ fn visit_equal(left: &Node, right: &Node, interpreter_context: &mut InterpreterC
         right,
         (
             Some(|a : bool, b : bool| -> Node { return Node::Boolean(a == b); }),
-            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a == b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a == b); }),
+            Some(|a : String, b : String| -> Node { return Node::Boolean(a == b); })
         ),
         interpreter_context
     );
@@ -433,7 +442,8 @@ fn visit_not_equal(left: &Node, right: &Node, interpreter_context: &mut Interpre
         right,
         (
             Some(|a : bool, b : bool| -> Node { return Node::Boolean(a != b); }),
-            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a != b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Boolean(a != b); }),
+            Some(|a : String, b : String| -> Node { return Node::Boolean(a != b); })
         ),
         interpreter_context
     );
@@ -445,7 +455,8 @@ fn visit_add(left: &Node, right: &Node, interpreter_context: &mut InterpreterCon
         right,
         (
             None,
-            Some(|a : f32, b : f32| -> Node { return Node::Number(a + b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Number(a + b); }),
+            Some(|a : String, b : String| -> Node { return Node::String(a + &b); })
         ),
         interpreter_context
     );
@@ -457,7 +468,8 @@ fn visit_sub(left: &Node, right: &Node, interpreter_context: &mut InterpreterCon
         right,
         (
             None,
-            Some(|a : f32, b : f32| -> Node { return Node::Number(a - b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Number(a - b); }),
+            None
         ),
         interpreter_context
     );
@@ -469,7 +481,8 @@ fn visit_div(left: &Node, right: &Node, interpreter_context: &mut InterpreterCon
         right,
         (
             None,
-            Some(|a : f32, b : f32| -> Node { return Node::Number(a / b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Number(a / b); }),
+            None
         ),
         interpreter_context
     );
@@ -481,7 +494,8 @@ fn visit_mul(left: &Node, right: &Node, interpreter_context: &mut InterpreterCon
         right,
         (
             None,
-            Some(|a : f32, b : f32| -> Node { return Node::Number(a * b); })
+            Some(|a : f32, b : f32| -> Node { return Node::Number(a * b); }),
+            None
         ),
         interpreter_context
     )
@@ -1050,8 +1064,8 @@ fn interpret(tree : Node, interpreter_context: &mut InterpreterContext) -> Node 
     return visit(&tree, interpreter_context);
 }
 
-fn main() {
-    let mut lexer_context : LexerContext = LexerContext::new(String::from("{ x = prompt `Enter your name: `; display `Hi {x}\n` }"));
+fn execute_string(string : String) {
+    let mut lexer_context : LexerContext = LexerContext::new(string);
     let tokens : Vec<Token> = lex(&mut lexer_context);
 
     let mut i : usize = 0;
@@ -1073,6 +1087,24 @@ fn main() {
         Node::Number(value) => println!("Result is number {value}"),
         Node::Boolean(value) => println!("Result is bool {value}"),
         Node::String(value) => println!("Result is string {value}"),
-        _ => println!("Interpreter didn't return value")
+        _ => println!("Interpreter didn't return value: {result}")
+    }
+}
+
+fn main() {
+    let args : Vec<String> = env::args().collect();
+
+    // First argument is program name
+    if args.len() >= 2 {
+        let file_path = &args[1];
+
+        match fs::read_to_string(file_path) {
+            Ok(file_data) => {
+                execute_string(file_data);
+            },
+            Err(e) => panic!("Failed to read file {file_path}, {e}")
+        }
+    } else {
+        execute_string(String::from("{ x = 5; 5 + x }"));
     }
 }
