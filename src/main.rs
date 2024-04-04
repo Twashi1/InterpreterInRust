@@ -30,6 +30,8 @@ enum Node {
     Assign(String, Box<Node>),
     // Condition, then compound, then else tree
     If(Box<Node>, Box<Node>, Option<Box<Node>>),
+    // Condition, then compound
+    While(Box<Node>, Box<Node>),
     Display(Box<Node>),
     Prompt(Box<Node>),
     Compound(Vec<Node>)
@@ -60,6 +62,7 @@ impl fmt::Display for Node {
             Node::Variable(_) => write!(f, "Variable"),
             Node::Assign(_, _) => write!(f, "Assign"),
             Node::If(_, _, _) => write!(f, "If"),
+            Node::While(_, _) => write!(f, "While"),
             Node::Display(_) => write!(f, "Display"),
             Node::Prompt(_) => write!(f, "Prompt"),
             Node::Compound(_) => write!(f, "Compound"),
@@ -124,6 +127,7 @@ fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
         Node::BooleanAnd(children)          => return visit_and(&children[0], &children[1], interpreter_context),
         Node::BooleanNot(node)              => return visit_not(&node, interpreter_context),
         Node::If(condition, compound, tree) => return visit_if(&condition, &compound, &tree, interpreter_context),
+        Node::While(condition, compound)    => return visit_while(&condition, &compound, interpreter_context),
         Node::Display(node)                 => return visit_display(node, interpreter_context),
         Node::Prompt(node)                  => return visit_prompt(node, interpreter_context),
         Node::None                          => return Node::None
@@ -308,6 +312,22 @@ fn visit_if(condition : &Node, compound : &Node, else_tree : &Option<Box<Node>>,
         }
     } else {
         panic!("Expected condition to return boolean value");
+    }
+}
+
+fn visit_while(condition : &Node, compound : &Node, interpreter_context : &mut InterpreterContext) -> Node {
+    let mut last_value : Node = Node::None;
+
+    loop {
+        if let Node::Boolean(value) = visit(condition, interpreter_context) {
+            if value {
+                last_value = visit(compound, interpreter_context);
+            } else {
+                return last_value;
+            }
+        } else {
+            panic!("Expected condition to return boolean value");
+        }
     }
 }
 
@@ -524,6 +544,7 @@ enum Token {
     And,
     If,
     Else,
+    While,
     OpenBrace,
     CloseBrace,
     OpenParen,
@@ -558,6 +579,7 @@ impl fmt::Display for Token {
             Token::And => write!(f, "And"),
             Token::If => write!(f, "If"),
             Token::Else => write!(f, "Else"),
+            Token::While => write!(f, "While"),
             Token::OpenBrace => write!(f, "OpenBrace"),
             Token::CloseBrace => write!(f, "CloseBrace"),
             Token::OpenParen => write!(f, "OpenParen"),
@@ -617,6 +639,7 @@ fn copy_token(token : &Token) -> Token {
         Token::Not => return Token::Not,
         Token::If => return Token::If,
         Token::Else => return Token::Else,
+        Token::While => return Token::While,
         Token::Display => return Token::Display,
         Token::Prompt => return Token::Prompt,
         _ => panic!("Couldn't copy token {}", *token)
@@ -627,6 +650,7 @@ fn read_identifier(string : &String, pos : &mut usize) -> Token {
     let keywords : collections::BTreeMap<String, Token> = collections::BTreeMap::from([
         (String::from("if"), Token::If),
         (String::from("else"), Token::Else),
+        (String::from("while"), Token::While),
         (String::from("true"), Token::Boolean(true)),
         (String::from("false"), Token::Boolean(false)),
         (String::from("and"), Token::And),
@@ -1016,6 +1040,16 @@ fn parse_if(parser_context : &mut ParserContext) -> Node {
     }
 }
 
+fn parse_while(parser_context : &mut ParserContext) -> Node {
+    // Eat while token
+    parser_context.token_index += 1;
+
+    let condition : Node = precedence_expression(parser_context, PrecedenceLevels::Expression);
+    let compound : Node = parse_compound(parser_context);
+
+    return Node::While(Box::new(condition), Box::new(compound));
+}
+
 fn statement(parser_context : &mut ParserContext) -> Node {
     while parser_context.token_index < parser_context.token_stream.len() {
         let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
@@ -1046,6 +1080,7 @@ fn statement(parser_context : &mut ParserContext) -> Node {
             Token::Prompt                   |
             Token::OpenParen                => return precedence_expression(parser_context, PrecedenceLevels::Expression),
             Token::If => return parse_if(parser_context),
+            Token::While => return parse_while(parser_context),
             _ => return Node::None
         }
     }
@@ -1067,14 +1102,6 @@ fn interpret(tree : Node, interpreter_context: &mut InterpreterContext) -> Node 
 fn execute_string(string : String) {
     let mut lexer_context : LexerContext = LexerContext::new(string);
     let tokens : Vec<Token> = lex(&mut lexer_context);
-
-    let mut i : usize = 0;
-
-    for token in &tokens {
-        println!("Token {i}: {token}");
-
-        i += 1;
-    }
 
     let mut parser_context : ParserContext = ParserContext::new(&tokens);
     let tree : Node = parse(&mut parser_context);
@@ -1105,6 +1132,6 @@ fn main() {
             Err(e) => panic!("Failed to read file {file_path}, {e}")
         }
     } else {
-        execute_string(String::from("{ x = 5; 5 + x }"));
+        execute_string(String::from("{ x = 0; while x < 10 { x = x + 1; display `{x}\n` } }"));
     }
 }
