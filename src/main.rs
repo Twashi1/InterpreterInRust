@@ -1,5 +1,5 @@
 use core::{fmt, panic};
-use std::{collections, io::{stdin, Write}, fs, env};
+use std::{collections, io::{stdin, Write}, fs, env, rc::Rc};
 
 // https://rust-unofficial.github.io/patterns/patterns/behavioural/visitor.html
 
@@ -34,6 +34,10 @@ enum Node {
     While(Box<Node>, Box<Node>),
     Display(Box<Node>),
     Prompt(Box<Node>),
+    // Parameter list, then compound
+    FunctionDeclaration(String, Vec<String>, Rc<Node>),
+    // Argument list
+    FunctionCall(String, Vec<Box<Node>>),
     Compound(Vec<Node>)
 }
 
@@ -63,6 +67,8 @@ impl fmt::Display for Node {
             Node::Assign(_, _) => write!(f, "Assign"),
             Node::If(_, _, _) => write!(f, "If"),
             Node::While(_, _) => write!(f, "While"),
+            Node::FunctionDeclaration(_, _, _) => write!(f, "FunctionDeclaration"),
+            Node::FunctionCall(_, _) => write!(f, "FunctionCall"),
             Node::Display(_) => write!(f, "Display"),
             Node::Prompt(_) => write!(f, "Prompt"),
             Node::Compound(_) => write!(f, "Compound"),
@@ -70,8 +76,64 @@ impl fmt::Display for Node {
     }
 }
 
-struct InterpreterContext<'mem> {
-    memory : &'mem mut collections::BTreeMap<String, Node>
+struct Scope {
+    memory : collections::BTreeMap<String, Node>
+}
+
+struct Memory {
+    scopes : Vec<Scope>
+}
+
+impl Memory {
+    pub fn push_scope(&mut self) {
+        self.scopes.push(Scope{ memory : collections::BTreeMap::<String, Node>::new() });
+    }
+
+    pub fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    pub fn lookup(&self, string : &String) -> &Node {
+        for scope in &self.scopes {
+            match scope.memory.get(string) {
+                Some(value) => return value,
+                None => {}
+            }
+        }
+
+        panic!("Variable did not exist in any scope");
+    }
+
+    pub fn insertOrUpdate(&mut self, string : &String, node : Node) -> &Node {
+        if self.scopes.len() == 0 {
+            self.push_scope();
+        }
+
+        let mut found_scope : Option<&mut Scope> = None;
+
+        for scope in &mut self.scopes {
+            if scope.memory.contains_key(string) {
+                found_scope = Some(scope);
+
+                break;
+            }
+        }
+
+        match found_scope {
+            None => { self.scopes.last_mut().unwrap().memory.insert(String::from(string), node); },
+            Some(scope) => { *scope.memory.get_mut(string).unwrap() = node; }
+        };
+
+        return self.lookup(string);
+    }
+
+    pub fn new() -> Memory {
+        return Memory{scopes : Vec::new() };
+    }
+}
+
+struct InterpreterContext {
+    memory : Memory
 }
 
 struct ParserContext<'mem> {
@@ -96,9 +158,9 @@ impl ParserContext<'_> {
     }
 }
 
-impl InterpreterContext<'_> {
-    pub fn new<'mem>(memory : &'mem mut collections::BTreeMap<String, Node>) -> InterpreterContext<'mem> {
-        return InterpreterContext{memory: memory};
+impl InterpreterContext {
+    pub fn new() -> InterpreterContext {
+        return InterpreterContext{ memory : Memory::new() };
     }
 }
 
@@ -130,6 +192,8 @@ fn visit(n: &Node, interpreter_context: &mut InterpreterContext) -> Node {
         Node::While(condition, compound)    => return visit_while(&condition, &compound, interpreter_context),
         Node::Display(node)                 => return visit_display(node, interpreter_context),
         Node::Prompt(node)                  => return visit_prompt(node, interpreter_context),
+        Node::FunctionDeclaration(name, parameters, compound) => return visit_function_declaration(name, parameters.to_vec(), compound.clone(), interpreter_context),
+        Node::FunctionCall(name, arguments) => return visit_function_call(name, arguments, interpreter_context),
         Node::None                          => return Node::None
     }
 }
@@ -146,6 +210,42 @@ fn string_convert(node : &Node) -> String {
         Node::Boolean(value) => return value.to_string(),
         _ => panic!("No string conversion available for {node}")
     }
+}
+
+fn visit_function_declaration(name : &String, parameters : Vec<String>, compound : Rc<Node>, interpreter_context : &mut InterpreterContext) -> Node {
+    interpreter_context.memory.insertOrUpdate(name, Node::FunctionDeclaration(String::from(name), parameters, compound.clone()));
+
+    return Node::Variable(String::from(name));
+}
+
+fn visit_function_call(name : &String, arguments : &Vec<Box<Node>>, interpreter_context : &mut InterpreterContext) -> Node {
+    // Get corresponding function declaration
+    let parameters : Vec<String>;
+    let compound : Rc<Node>;
+    
+    {
+        let function_declaration = interpreter_context.memory.lookup(name);
+
+        if let Node::FunctionDeclaration(_, ps, c) = function_declaration {
+            parameters = ps.clone();
+            compound = c.clone();
+        } else {
+            panic!("Expected name to be function type");
+        }
+    }
+
+    // Create new interpreter context
+    let mut new_context : InterpreterContext = InterpreterContext::new();
+    // Push arguments into scope based off parameter names
+    new_context.memory.push_scope();
+
+    assert_eq!(arguments.len(), parameters.len());
+
+    for i in 0..arguments.len() {
+        new_context.memory.insertOrUpdate(&parameters[i], visit(&arguments[i], interpreter_context));
+    }
+
+    return visit(&compound, &mut new_context);
 }
 
 fn visit_display(node : &Node, interpreter_context : &mut InterpreterContext) -> Node {
@@ -294,7 +394,8 @@ fn copy_value(node : &Node) -> Node {
         Node::Boolean(value) => return Node::Boolean(*value),
         Node::String(value) => return Node::String(String::from(value)),
         Node::InterpolatedString(value) => return Node::InterpolatedString(String::from(value)),
-        _ => panic!("Expected variable to have value")
+        Node::FunctionDeclaration(name, parameters, compound) => return Node::FunctionDeclaration(String::from(name), parameters.to_vec(), compound.clone()),
+        _ => panic!("Expected variable to have value, not {node}")
     }
 }
 
@@ -368,25 +469,25 @@ fn visit_not(value: &Node, interpreter_context : &mut InterpreterContext) -> Nod
 fn visit_assign(string : &String, value : &Node, interpreter_context : &mut InterpreterContext) -> Node {
     let rhs = visit(value, interpreter_context);
     
-    if interpreter_context.memory.contains_key(string) {
-        *interpreter_context.memory.get_mut(string).unwrap() = rhs;
-    } else {
-        interpreter_context.memory.insert(String::from(string), rhs);
-    }
-
-    return copy_value(&interpreter_context.memory[string]);
+    return copy_value(interpreter_context.memory.insertOrUpdate(string, rhs));
 }
 
 fn visit_variable(string : &String, interpreter_context: &mut InterpreterContext) -> Node {
-    return copy_value(&interpreter_context.memory[string]);
+    return copy_value(&interpreter_context.memory.lookup(string));
 }
 
 fn visit_compound(children : &Vec<Node>, interpreter_context: &mut InterpreterContext) -> Node {
     let mut last_node : Node = Node::None;
+
+    // Add a scope every time we enter a compound
+    interpreter_context.memory.push_scope();
     
     for child in children {
         last_node = visit(child, interpreter_context);
     }
+
+    // Pop scope every time we exit a compound
+    interpreter_context.memory.pop_scope();
 
     return last_node;
 }
@@ -551,6 +652,8 @@ enum Token {
     CloseParen,
     Display,
     Prompt,
+    Function,
+    Comma,
     StatementEnd
 }
 
@@ -586,6 +689,8 @@ impl fmt::Display for Token {
             Token::CloseParen => write!(f, "CloseParen"),
             Token::Display => write!(f, "Display"),
             Token::Prompt => write!(f, "Prompt"),
+            Token::Function => write!(f, "Function"),
+            Token::Comma => write!(f, "Comma"),
             Token::StatementEnd => write!(f, "StatementEnd")
         }
     }
@@ -642,6 +747,7 @@ fn copy_token(token : &Token) -> Token {
         Token::While => return Token::While,
         Token::Display => return Token::Display,
         Token::Prompt => return Token::Prompt,
+        Token::Function => return Token::Function,
         _ => panic!("Couldn't copy token {}", *token)
     }
 }
@@ -657,7 +763,8 @@ fn read_identifier(string : &String, pos : &mut usize) -> Token {
         (String::from("or"), Token::Or),
         (String::from("not"), Token::Not),
         (String::from("display"), Token::Display),
-        (String::from("prompt"), Token::Prompt)
+        (String::from("prompt"), Token::Prompt),
+        (String::from("fn"), Token::Function)
     ]);
 
     let start: usize = *pos;
@@ -768,6 +875,7 @@ fn lex(lexer_context : &mut LexerContext) -> Vec<Token> {
                 b'}' => new_token = Token::CloseBrace,
                 b'(' => new_token = Token::OpenParen,
                 b')' => new_token = Token::CloseParen,
+                b',' => new_token = Token::Comma,
                 b'=' => {
                     match lex_peek(&lexer_context) {
                         b'=' => { new_token = Token::Equal; lexer_context.program_index += 1; },
@@ -1050,6 +1158,78 @@ fn parse_while(parser_context : &mut ParserContext) -> Node {
     return Node::While(Box::new(condition), Box::new(compound));
 }
 
+fn parse_function_declaration(parser_context : &mut ParserContext) -> Node {
+    // Eat function token
+    parser_context.token_index += 1;
+
+    // Get function name
+    let function_name : String;
+
+    if let Token::Identifier(name) = &parser_context.token_stream[parser_context.token_index] {
+        function_name = String::from(name);
+
+        parser_context.token_index += 1;
+    } else {
+        panic!("Expected function name after function keyword");
+    }
+
+    // Advance open parenthesis
+    if let Token::OpenParen = parser_context.token_stream[parser_context.token_index] {
+        parser_context.token_index += 1;
+    } else {
+        panic!("Expected opening parenthesis for function declaration");
+    }
+
+    let mut parameters : Vec<String> = Vec::new();
+
+    // Eat parameter list
+    loop {
+        // Eat parameter (identifier)
+        match &parser_context.token_stream[parser_context.token_index] {
+            Token::Identifier(name) => {
+                parameters.push(String::from(name));
+
+                parser_context.token_index += 1;
+            },
+            Token::CloseParen => { parser_context.token_index += 1; break },
+            _ => panic!("Expected identifier in parameter list")
+        }
+
+        match &parser_context.token_stream[parser_context.token_index] {
+            Token::Comma => parser_context.token_index += 1,
+            Token::CloseParen => { parser_context.token_index += 1; break },
+            _ => panic!("Expected comma or closing parenthesis")
+        }
+    }
+
+    // Eat function body and return function declaration
+    return Node::FunctionDeclaration(function_name, parameters, parse_compound(parser_context).into());
+}
+
+fn parse_argument_list(parser_context : &mut ParserContext) -> Vec<Box<Node>> {
+    // Assuming advanced passed first parenthesis
+    let mut arguments : Vec<Box<Node>> = Vec::new();
+
+    loop {
+        if let Token::CloseParen = parser_context.token_stream[parser_context.token_index] {
+            parser_context.token_index += 1;
+            
+            break;
+        }
+
+        // Eat argument
+        arguments.push(Box::new(precedence_expression(parser_context, PrecedenceLevels::Expression)));
+        // Eat comma/closing parenthesis
+        match &parser_context.token_stream[parser_context.token_index] {
+            Token::Comma => parser_context.token_index += 1,
+            Token::CloseParen => { parser_context.token_index += 1; break },
+            _ => panic!("Expected comma or closing parenthesis")
+        }
+    }
+
+    return arguments;
+}
+
 fn statement(parser_context : &mut ParserContext) -> Node {
     while parser_context.token_index < parser_context.token_stream.len() {
         let current_token : &Token = &parser_context.token_stream[parser_context.token_index];
@@ -1065,6 +1245,12 @@ fn statement(parser_context : &mut ParserContext) -> Node {
 
                         return Node::Assign(String::from(name), Box::new(rhs));
                     },
+                    Token::OpenParen => {
+                        // Advance past function name and open parenthesis
+                        parser_context.token_index += 2;
+
+                        return Node::FunctionCall(String::from(name), parse_argument_list(parser_context));
+                    }
                     _ => {
                         return precedence_expression(parser_context, PrecedenceLevels::Expression);
                     }
@@ -1081,6 +1267,7 @@ fn statement(parser_context : &mut ParserContext) -> Node {
             Token::OpenParen                => return precedence_expression(parser_context, PrecedenceLevels::Expression),
             Token::If => return parse_if(parser_context),
             Token::While => return parse_while(parser_context),
+            Token::Function => return parse_function_declaration(parser_context),
             _ => return Node::None
         }
     }
@@ -1103,11 +1290,14 @@ fn execute_string(string : String) {
     let mut lexer_context : LexerContext = LexerContext::new(string);
     let tokens : Vec<Token> = lex(&mut lexer_context);
 
+    for token in &tokens {
+        println!("{token}");
+    }
+
     let mut parser_context : ParserContext = ParserContext::new(&tokens);
     let tree : Node = parse(&mut parser_context);
 
-    let mut memory : collections::BTreeMap<String, Node> = collections::BTreeMap::<String, Node>::new();
-    let mut interpreter_context : InterpreterContext = InterpreterContext::new(&mut memory);
+    let mut interpreter_context : InterpreterContext = InterpreterContext::new();
     let result : Node = interpret(tree, &mut interpreter_context);
 
     match result {
@@ -1132,6 +1322,21 @@ fn main() {
             Err(e) => panic!("Failed to read file {file_path}, {e}")
         }
     } else {
-        execute_string(String::from("{ x = 0; while x < 10 { x = x + 1; display `{x}\n` } }"));
+        execute_string(String::from("
+{
+    fn func() {
+        display `func\n`;
+        5
+    };
+
+    renamed = func;
+    x = 0;
+
+    while x < 2 {
+        x = x + 1;
+        renamed()
+    }
+}        
+        "));
     }
 }
